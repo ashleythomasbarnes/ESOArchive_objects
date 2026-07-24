@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eso-object-types"
+version = "0.1.0"
+description = "Prototype ESO spectrum object-type enrichment using SIMBAD and NED"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "astropy>=6.1",
+    "astropy-healpix>=1.0",
+    "astroquery>=0.4.8",
+    "pyvo>=1.6",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+notebook = [
+    "jupyterlab>=4.0",
+    "matplotlib>=3.8",
+    "pandas>=2.2",
+]
+
+[project.scripts]
+eso-object-types = "eso_object_types.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: contacts the live ESO, SIMBAD, and NED services",
+]

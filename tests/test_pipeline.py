@@ -1,0 +1,196 @@
+from __future__ import annotations
+
+import json
+
+from eso_object_types.database import Database
+from eso_object_types.geometry import healpix_order10
+from eso_object_types.models import (
+    BatchResult,
+    CatalogObject,
+    ObjectMatch,
+    Observation,
+    RunConfig,
+)
+from eso_object_types.pipeline import Pipeline
+
+
+def make_observation(index: int) -> Observation:
+    ra = 10.0 + index
+    return Observation(
+        eso_dp_id=f"ESO-{index}",
+        obs_publisher_did=f"ivo://eso/{index}",
+        target_name=f"Target {index}",
+        ra_deg=ra,
+        dec_deg=-20.0,
+        s_fov_deg=1.0 / 3600.0,
+        s_region=None,
+        search_radius_deg=1.0 / 3600.0,
+        instrument_name="TEST",
+        access_url=None,
+        healpix_order10=healpix_order10(ra, -20.0),
+    )
+
+
+class FakeEso:
+    calls = 0
+
+    def __init__(self, endpoint: str):
+        self.endpoint = endpoint
+
+    def fetch_observations(self, limit: int, min_radius_arcsec: float):
+        type(self).calls += 1
+        return [make_observation(index) for index in range(limit)]
+
+
+class FakeCatalog:
+    catalog = "simbad"
+    calls = 0
+
+    def __init__(self, endpoint: str):
+        self.endpoint = endpoint
+
+    def query_batch(self, targets):
+        type(self).calls += 1
+        objects = []
+        matches = []
+        for target in targets:
+            object_id = target.search_key
+            objects.append(
+                CatalogObject(
+                    catalog=self.catalog,
+                    catalog_object_id=object_id,
+                    preferred_name=object_id,
+                    ra_deg=target.ra_deg,
+                    dec_deg=target.dec_deg,
+                    primary_type_code="TEST",
+                    primary_type_label="Test object",
+                    primary_type_description=None,
+                )
+            )
+            for observation_id in target.observation_ids:
+                matches.append(
+                    ObjectMatch(
+                        eso_dp_id=observation_id,
+                        catalog=self.catalog,
+                        catalog_object_id=object_id,
+                        separation_arcsec=0.0,
+                    )
+                )
+        return BatchResult(tuple(objects), tuple(matches))
+
+
+class FakeSimbad(FakeCatalog):
+    catalog = "simbad"
+    calls = 0
+
+
+class FakeNed(FakeCatalog):
+    catalog = "ned"
+    calls = 0
+
+
+class FailingNed(FakeCatalog):
+    catalog = "ned"
+    calls = 0
+
+    def query_batch(self, targets):
+        type(self).calls += 1
+        raise TimeoutError("simulated timeout")
+
+
+def test_pipeline_batches_exports_and_is_idempotent(tmp_path) -> None:
+    FakeEso.calls = FakeSimbad.calls = FakeNed.calls = 0
+    database = Database(tmp_path / "prototype.sqlite")
+    config = RunConfig(
+        limit=3,
+        simbad_batch_size=2,
+        ned_batch_size=2,
+        retries=2,
+        output_dir=str(tmp_path / "output"),
+    )
+    try:
+        pipeline = Pipeline(
+            database,
+            config,
+            eso_factory=FakeEso,
+            simbad_factory=FakeSimbad,
+            ned_factory=FakeNed,
+            sleep=lambda _: None,
+            random_source=lambda: 0.0,
+        )
+        run_id, code, summary = pipeline.run()
+        assert code == 0
+        assert summary["observations"] == 3
+        assert summary["observation_object_links"] == 6
+        assert FakeEso.calls == 1
+        assert FakeSimbad.calls == 2
+        assert FakeNed.calls == 2
+
+        run_id_again, code, _ = pipeline.run(resume_run=run_id)
+        assert run_id_again == run_id
+        assert code == 0
+        assert FakeEso.calls == 1
+        assert FakeSimbad.calls == 2
+        assert FakeNed.calls == 2
+
+        export_dir = tmp_path / "output" / run_id
+        assert (export_dir / "observations.csv").exists()
+        assert (export_dir / "catalog_objects.csv").exists()
+        assert (export_dir / "object_types.csv").exists()
+        assert (export_dir / "observation_objects.csv").exists()
+        assert (export_dir / "run_summary.csv").exists()
+        log_lines = (tmp_path / "output" / "logs" / f"{run_id}.jsonl").read_text()
+        assert '"event": "batch_complete"' in log_lines
+        assert '"event": "batch_skip"' in log_lines
+    finally:
+        database.close()
+
+
+def test_partial_run_resumes_only_failed_batches(tmp_path) -> None:
+    FakeEso.calls = FakeSimbad.calls = FakeNed.calls = FailingNed.calls = 0
+    database = Database(tmp_path / "prototype.sqlite")
+    config = RunConfig(
+        limit=2,
+        simbad_batch_size=10,
+        ned_batch_size=10,
+        retries=2,
+        output_dir=str(tmp_path / "output"),
+    )
+    try:
+        first = Pipeline(
+            database,
+            config,
+            eso_factory=FakeEso,
+            simbad_factory=FakeSimbad,
+            ned_factory=FailingNed,
+            sleep=lambda _: None,
+            random_source=lambda: 0.0,
+        )
+        run_id, code, _ = first.run()
+        assert code == 2
+        assert FailingNed.calls == 2
+        assert FakeSimbad.calls == 1
+        assert database.get_run(run_id)["status"] == "partial"
+
+        resumed = Pipeline(
+            database,
+            config,
+            eso_factory=FakeEso,
+            simbad_factory=FakeSimbad,
+            ned_factory=FakeNed,
+            sleep=lambda _: None,
+            random_source=lambda: 0.0,
+        )
+        _, code, summary = resumed.run(resume_run=run_id)
+        assert code == 0
+        assert summary["observation_object_links"] == 4
+        assert FakeEso.calls == 1
+        assert FakeSimbad.calls == 1
+        assert FakeNed.calls == 1
+        assert database.get_run(run_id)["status"] == "completed"
+
+        config_json = json.loads(database.get_run(run_id)["config_json"])
+        assert config_json["limit"] == 2
+    finally:
+        database.close()
+

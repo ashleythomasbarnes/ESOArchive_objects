@@ -1,0 +1,2 @@
+[console_scripts]
+eso-object-types = eso_object_types.cli:main

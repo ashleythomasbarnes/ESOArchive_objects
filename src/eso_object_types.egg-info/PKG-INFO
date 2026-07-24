@@ -1,0 +1,130 @@
+Metadata-Version: 2.4
+Name: eso-object-types
+Version: 0.1.0
+Summary: Prototype ESO spectrum object-type enrichment using SIMBAD and NED
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: astropy>=6.1
+Requires-Dist: astropy-healpix>=1.0
+Requires-Dist: astroquery>=0.4.8
+Requires-Dist: pyvo>=1.6
+Provides-Extra: test
+Requires-Dist: pytest>=8.0; extra == "test"
+Provides-Extra: notebook
+Requires-Dist: jupyterlab>=4.0; extra == "notebook"
+Requires-Dist: matplotlib>=3.8; extra == "notebook"
+Requires-Dist: pandas>=2.2; extra == "notebook"
+
+# ESO spectrum object-type prototype
+
+This prototype enriches reduced ESO spectrum metadata with nearby SIMBAD and
+NED objects. It stores objects once per source catalog and records the
+many-to-many links between catalog objects and ESO data products.
+
+It does not download spectral FITS files. Only the ESO ObsCore metadata needed
+for positional matching are retrieved.
+
+## Set up
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[test,notebook]'
+```
+
+## Run the 50-spectrum prototype
+
+```bash
+.venv/bin/eso-object-types run
+```
+
+The default run:
+
+- selects 50 deterministic reduced-spectrum records from ESO ObsCore;
+- uses `max(s_fov / 2, 1 arcsec)` as each search radius;
+- submits all 50 positions in one SIMBAD upload-table query;
+- submits up to 50 cones in each asynchronous NED TAP query;
+- writes `output/eso_object_types.sqlite`;
+- writes structured events to `output/logs/<run_id>.jsonl`; and
+- exports run-scoped CSV files under `output/<run_id>/`.
+
+Useful options include:
+
+```bash
+.venv/bin/eso-object-types run \
+  --limit 50 \
+  --min-radius-arcsec 1 \
+  --simbad-batch-size 50000 \
+  --ned-batch-size 50 \
+  --retries 5 \
+  --database output/eso_object_types.sqlite \
+  --output-dir output
+```
+
+A partial run exits with status 2. Its final console output includes the run
+identifier. Retry only unfinished batches with:
+
+```bash
+.venv/bin/eso-object-types run --resume-run <run_id>
+```
+
+Resume uses the configuration saved with the original run. Completed ESO,
+SIMBAD, and NED batches are not repeated.
+
+Recreate the CSV reports for the latest run:
+
+```bash
+.venv/bin/eso-object-types report
+```
+
+Pass `--run-id <run_id>` to report on a specific run.
+
+## Interpret the output
+
+Open the interpretation notebook from the repository root:
+
+```bash
+.venv/bin/jupyter lab notebooks/interpret_outputs.ipynb
+```
+
+For a Conda environment:
+
+```bash
+conda create -n eso-object-types python=3.12 pip -y
+conda activate eso-object-types
+python -m pip install -e '.[test,notebook]'
+jupyter lab notebooks/interpret_outputs.ipynb
+```
+
+The notebook automatically opens `output/eso_object_types.sqlite`, selects the
+latest run, explains the table relationships, summarizes catalog matches and
+object types, demonstrates filtering ESO spectra by type, lists unmatched
+spectra, and checks the link geometry and uniqueness constraints.
+
+## Output tables
+
+- `observations`: one row per ESO data-product identifier.
+- `object_types`: normalized primary types for each source catalog.
+- `catalog_objects`: objects uniquely keyed by catalog and catalog ID.
+- `observation_objects`: object-to-spectrum links and angular separations.
+- `pipeline_runs`: immutable run configuration and final status.
+- `run_observations`: observations belonging to each run.
+- `service_calls`: batch hashes, attempts, timings, row counts, and failures.
+
+SIMBAD and NED records are intentionally not merged across catalogs. Within a
+catalog, SIMBAD `oid` and NED `objid` provide stable deduplication keys.
+
+## Tests
+
+The default suite uses mock services and does not contact archives:
+
+```bash
+.venv/bin/python -m pytest
+```
+
+The opt-in smoke test contacts ESO, SIMBAD, and NED for two spectra:
+
+```bash
+RUN_LIVE_TESTS=1 .venv/bin/python -m pytest -m live -v
+```
+
+See [docs/scaling.md](docs/scaling.md) before attempting a larger run.

@@ -1,0 +1,12 @@
+astropy>=6.1
+astropy-healpix>=1.0
+astroquery>=0.4.8
+pyvo>=1.6
+
+[notebook]
+jupyterlab>=4.0
+matplotlib>=3.8
+pandas>=2.2
+
+[test]
+pytest>=8.0
