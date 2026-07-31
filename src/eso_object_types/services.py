@@ -17,6 +17,7 @@ from pyvo.dal import TAPService
 from .geometry import healpix_order10, search_radius_deg, validate_position
 from .models import (
     BatchResult,
+    CatalogAlias,
     CatalogObject,
     ObjectMatch,
     Observation,
@@ -115,8 +116,12 @@ def build_simbad_query() -> str:
             b.ra,
             b.dec,
             b.otype,
+            b.sp_type,
+            b.morph_type,
             d.label,
             d.description,
+            d.path,
+            d.is_candidate,
             DISTANCE(
                 POINT('ICRS', b.ra, b.dec),
                 POINT('ICRS', u.ra_deg, u.dec_deg)
@@ -166,6 +171,51 @@ class SimbadClient:
         )
         return map_simbad_results(targets, table)
 
+    def query_aliases(
+        self, object_ids: Sequence[str]
+    ) -> tuple[CatalogAlias, ...]:
+        if not object_ids:
+            return ()
+        upload = Table(
+            rows=[(int(object_id),) for object_id in object_ids],
+            names=("oid",),
+            dtype=("i8",),
+        )
+        table = self.client.query_tap(
+            build_simbad_alias_query(),
+            maxrec=self.client.hardlimit,
+            async_job=len(object_ids) > 10_000,
+            objects=upload,
+        )
+        if table is None:
+            return ()
+        aliases = {
+            (
+                str(clean_value(row_value(row, "oidref"))),
+                str(clean_value(row_value(row, "id"))),
+            )
+            for row in table
+            if clean_value(row_value(row, "oidref")) is not None
+            and clean_value(row_value(row, "id")) is not None
+        }
+        return tuple(
+            CatalogAlias(
+                catalog="simbad",
+                catalog_object_id=object_id,
+                alias=alias,
+            )
+            for object_id, alias in sorted(aliases)
+        )
+
+
+def build_simbad_alias_query() -> str:
+    return """
+        SELECT i.oidref, i.id
+        FROM ident AS i
+        JOIN TAP_UPLOAD.objects AS u
+          ON i.oidref = u.oid
+    """
+
 
 def map_simbad_results(
     targets: Sequence[SearchTarget], table: Table | None
@@ -192,6 +242,14 @@ def map_simbad_results(
             primary_type_description=clean_value(
                 row_value(row, "description")
             ),
+            primary_type_path=clean_value(row_value(row, "path")),
+            primary_type_is_candidate=(
+                None
+                if clean_value(row_value(row, "is_candidate")) is None
+                else bool(int(row_value(row, "is_candidate")))
+            ),
+            spectral_type=clean_value(row_value(row, "sp_type")),
+            morphological_type=clean_value(row_value(row, "morph_type")),
         )
         objects[object_id] = obj
         separation = float(row_value(row, "separation_arcsec"))

@@ -8,7 +8,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .models import BatchResult, Observation, RunConfig
+from .models import (
+    BatchResult,
+    BestObject,
+    BestObjectMember,
+    CatalogAlias,
+    Observation,
+    RunConfig,
+)
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -48,6 +55,8 @@ CREATE TABLE IF NOT EXISTS object_types (
     type_code TEXT NOT NULL,
     type_label TEXT,
     type_description TEXT,
+    type_path TEXT,
+    type_is_candidate INTEGER,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (catalog, type_code)
 );
@@ -60,6 +69,9 @@ CREATE TABLE IF NOT EXISTS catalog_objects (
     dec_deg REAL NOT NULL,
     primary_type_code TEXT,
     catalog_type_key TEXT,
+    spectral_type TEXT,
+    morphological_type TEXT,
+    aliases_retrieved_at TEXT,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (catalog, catalog_object_id),
     FOREIGN KEY (catalog, primary_type_code)
@@ -75,6 +87,58 @@ CREATE TABLE IF NOT EXISTS observation_objects (
     last_seen_run_id TEXT NOT NULL REFERENCES pipeline_runs(run_id),
     updated_at TEXT NOT NULL,
     PRIMARY KEY (eso_dp_id, catalog, catalog_object_id),
+    FOREIGN KEY (catalog, catalog_object_id)
+        REFERENCES catalog_objects(catalog, catalog_object_id)
+);
+
+CREATE TABLE IF NOT EXISTS catalog_object_aliases (
+    catalog TEXT NOT NULL,
+    catalog_object_id TEXT NOT NULL,
+    alias TEXT NOT NULL,
+    normalized_alias TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (catalog, catalog_object_id, alias),
+    FOREIGN KEY (catalog, catalog_object_id)
+        REFERENCES catalog_objects(catalog, catalog_object_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS observation_best_objects (
+    run_id TEXT NOT NULL,
+    eso_dp_id TEXT NOT NULL,
+    best_object_key TEXT,
+    best_object_name TEXT,
+    broad_category TEXT NOT NULL,
+    subcategory TEXT,
+    classification_detail TEXT,
+    confidence TEXT NOT NULL
+        CHECK (confidence IN ('high', 'medium', 'low', 'none')),
+    match_method TEXT NOT NULL,
+    target_name_variant TEXT,
+    separation_arcsec REAL,
+    normalized_separation REAL,
+    candidate_group_count INTEGER NOT NULL,
+    runner_up_margin REAL,
+    supporting_catalogs TEXT,
+    raw_catalog_types TEXT,
+    classification_conflict INTEGER NOT NULL,
+    alias_complete INTEGER NOT NULL,
+    ranking_version TEXT NOT NULL,
+    taxonomy_version TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, eso_dp_id),
+    FOREIGN KEY (run_id, eso_dp_id)
+        REFERENCES run_observations(run_id, eso_dp_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS observation_best_object_members (
+    run_id TEXT NOT NULL,
+    eso_dp_id TEXT NOT NULL,
+    catalog TEXT NOT NULL,
+    catalog_object_id TEXT NOT NULL,
+    member_role TEXT NOT NULL CHECK (member_role IN ('primary', 'supporting')),
+    PRIMARY KEY (run_id, eso_dp_id, catalog, catalog_object_id),
+    FOREIGN KEY (run_id, eso_dp_id)
+        REFERENCES observation_best_objects(run_id, eso_dp_id) ON DELETE CASCADE,
     FOREIGN KEY (catalog, catalog_object_id)
         REFERENCES catalog_objects(catalog, catalog_object_id)
 );
@@ -102,6 +166,12 @@ CREATE INDEX IF NOT EXISTS idx_catalog_objects_type
     ON catalog_objects(catalog, primary_type_code);
 CREATE INDEX IF NOT EXISTS idx_observation_objects_reverse
     ON observation_objects(catalog, catalog_object_id);
+CREATE INDEX IF NOT EXISTS idx_catalog_object_aliases_normalized
+    ON catalog_object_aliases(normalized_alias);
+CREATE INDEX IF NOT EXISTS idx_best_objects_category
+    ON observation_best_objects(run_id, broad_category);
+CREATE INDEX IF NOT EXISTS idx_best_members_catalog
+    ON observation_best_object_members(catalog, catalog_object_id);
 CREATE INDEX IF NOT EXISTS idx_run_observations_observation
     ON run_observations(eso_dp_id);
 CREATE INDEX IF NOT EXISTS idx_service_calls_status
@@ -122,7 +192,35 @@ class Database:
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA journal_mode = WAL")
         self.connection.executescript(SCHEMA)
+        self._migrate_schema()
         self.connection.commit()
+
+    def _column_names(self, table: str) -> set[str]:
+        return {
+            str(row["name"])
+            for row in self.connection.execute(f"PRAGMA table_info({table})")
+        }
+
+    def _migrate_schema(self) -> None:
+        migrations = {
+            "object_types": {
+                "type_path": "TEXT",
+                "type_is_candidate": "INTEGER",
+            },
+            "catalog_objects": {
+                "spectral_type": "TEXT",
+                "morphological_type": "TEXT",
+                "aliases_retrieved_at": "TEXT",
+            },
+        }
+        for table, columns in migrations.items():
+            existing = self._column_names(table)
+            for column, declaration in columns.items():
+                if column not in existing:
+                    self.connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+                    )
+        self.connection.execute("PRAGMA user_version = 2")
 
     def close(self) -> None:
         self.connection.close()
@@ -361,11 +459,14 @@ class Database:
                     connection.execute(
                         """
                         INSERT INTO object_types(
-                            catalog, type_code, type_label, type_description, updated_at
-                        ) VALUES (?, ?, ?, ?, ?)
+                            catalog, type_code, type_label, type_description,
+                            type_path, type_is_candidate, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(catalog, type_code) DO UPDATE SET
                             type_label = excluded.type_label,
                             type_description = excluded.type_description,
+                            type_path = excluded.type_path,
+                            type_is_candidate = excluded.type_is_candidate,
                             updated_at = excluded.updated_at
                         """,
                         (
@@ -373,6 +474,12 @@ class Database:
                             obj.primary_type_code,
                             obj.primary_type_label,
                             obj.primary_type_description,
+                            obj.primary_type_path,
+                            (
+                                None
+                                if obj.primary_type_is_candidate is None
+                                else int(obj.primary_type_is_candidate)
+                            ),
                             now,
                         ),
                     )
@@ -380,14 +487,17 @@ class Database:
                     """
                     INSERT INTO catalog_objects(
                         catalog, catalog_object_id, preferred_name, ra_deg, dec_deg,
-                        primary_type_code, catalog_type_key, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        primary_type_code, catalog_type_key, spectral_type,
+                        morphological_type, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(catalog, catalog_object_id) DO UPDATE SET
                         preferred_name = excluded.preferred_name,
                         ra_deg = excluded.ra_deg,
                         dec_deg = excluded.dec_deg,
                         primary_type_code = excluded.primary_type_code,
                         catalog_type_key = excluded.catalog_type_key,
+                        spectral_type = excluded.spectral_type,
+                        morphological_type = excluded.morphological_type,
                         updated_at = excluded.updated_at
                     """,
                     (
@@ -398,6 +508,8 @@ class Database:
                         obj.dec_deg,
                         obj.primary_type_code,
                         obj.catalog_type_key,
+                        obj.spectral_type,
+                        obj.morphological_type,
                         now,
                     ),
                 )
@@ -442,3 +554,161 @@ class Database:
                 ),
             )
 
+    def uncached_simbad_object_ids_for_run(self, run_id: str) -> list[str]:
+        return [
+            str(row[0])
+            for row in self.connection.execute(
+                """
+                SELECT DISTINCT co.catalog_object_id
+                FROM catalog_objects AS co
+                JOIN observation_objects AS oo
+                  ON oo.catalog = co.catalog
+                 AND oo.catalog_object_id = co.catalog_object_id
+                JOIN run_observations AS ro USING (eso_dp_id)
+                WHERE ro.run_id = ?
+                  AND co.catalog = 'simbad'
+                  AND co.aliases_retrieved_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM catalog_object_aliases AS ca
+                      WHERE ca.catalog = co.catalog
+                        AND ca.catalog_object_id = co.catalog_object_id
+                  )
+                ORDER BY co.catalog_object_id
+                """,
+                (run_id,),
+            )
+        ]
+
+    def complete_alias_call(
+        self,
+        run_id: str,
+        call_hash: str,
+        elapsed_seconds: float,
+        object_ids: Sequence[str],
+        aliases: Sequence[CatalogAlias],
+    ) -> None:
+        now = utc_now()
+        with self.transaction() as connection:
+            for object_id in object_ids:
+                connection.execute(
+                    """
+                    DELETE FROM catalog_object_aliases
+                    WHERE catalog = 'simbad' AND catalog_object_id = ?
+                    """,
+                    (object_id,),
+                )
+            for alias in aliases:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO catalog_object_aliases(
+                        catalog, catalog_object_id, alias, normalized_alias, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        alias.catalog,
+                        alias.catalog_object_id,
+                        alias.alias,
+                        "".join(
+                            character
+                            for character in alias.alias.casefold()
+                            if character.isalnum()
+                        ),
+                        now,
+                    ),
+                )
+            if object_ids:
+                placeholders = ",".join("?" for _ in object_ids)
+                connection.execute(
+                    f"""
+                    UPDATE catalog_objects
+                    SET aliases_retrieved_at = ?
+                    WHERE catalog = 'simbad'
+                      AND catalog_object_id IN ({placeholders})
+                    """,
+                    (now, *object_ids),
+                )
+            connection.execute(
+                """
+                UPDATE service_calls
+                SET status = 'completed', finished_at = ?, elapsed_seconds = ?,
+                    result_count = ?, error_type = NULL, error_message = NULL
+                WHERE run_id = ? AND service = 'simbad_alias'
+                  AND batch_hash = ?
+                """,
+                (
+                    utc_now(),
+                    elapsed_seconds,
+                    len(aliases),
+                    run_id,
+                    call_hash,
+                ),
+            )
+
+    def replace_best_objects(
+        self,
+        run_id: str,
+        best_objects: Sequence[BestObject],
+        members: Sequence[BestObjectMember],
+    ) -> None:
+        now = utc_now()
+        with self.transaction() as connection:
+            connection.execute(
+                "DELETE FROM observation_best_objects WHERE run_id = ?",
+                (run_id,),
+            )
+            for best in best_objects:
+                connection.execute(
+                    """
+                    INSERT INTO observation_best_objects(
+                        run_id, eso_dp_id, best_object_key, best_object_name,
+                        broad_category, subcategory, classification_detail,
+                        confidence, match_method, target_name_variant,
+                        separation_arcsec, normalized_separation,
+                        candidate_group_count, runner_up_margin,
+                        supporting_catalogs, raw_catalog_types,
+                        classification_conflict, alias_complete,
+                        ranking_version, taxonomy_version, updated_at
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        best.run_id,
+                        best.eso_dp_id,
+                        best.best_object_key,
+                        best.best_object_name,
+                        best.broad_category,
+                        best.subcategory,
+                        best.classification_detail,
+                        best.confidence,
+                        best.match_method,
+                        best.target_name_variant,
+                        best.separation_arcsec,
+                        best.normalized_separation,
+                        best.candidate_group_count,
+                        best.runner_up_margin,
+                        best.supporting_catalogs,
+                        best.raw_catalog_types,
+                        int(best.classification_conflict),
+                        int(best.alias_complete),
+                        best.ranking_version,
+                        best.taxonomy_version,
+                        now,
+                    ),
+                )
+            for member in members:
+                connection.execute(
+                    """
+                    INSERT INTO observation_best_object_members(
+                        run_id, eso_dp_id, catalog, catalog_object_id, member_role
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        member.run_id,
+                        member.eso_dp_id,
+                        member.catalog,
+                        member.catalog_object_id,
+                        member.member_role,
+                    ),
+                )

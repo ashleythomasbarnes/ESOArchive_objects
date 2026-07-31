@@ -11,6 +11,9 @@ permission to submit millions of public catalog requests.
 - SIMBAD receives uploaded coordinate tables instead of one query per
   spectrum. Its documented upload limit is 200,000 rows, while this prototype
   defaults to 50,000.
+- SIMBAD aliases are requested once per new catalog object in cached batches
+  of 10,000. Best-object ranking and later report rebuilds use the local
+  database and do not fetch FITS headers or submit SSA queries.
 - Every service batch has a deterministic hash and committed completion state,
   making interrupted work resumable.
 - Order-10 nested HEALPix identifiers are stored with ESO observations for
@@ -52,4 +55,3 @@ reproducibility, and service load explicit.
 Each prototype `run_summary.csv` estimates the number of unique positions and
 the number of SIMBAD and NED batches implied by two million spectra. The NED
 estimate is diagnostic only and is labelled as not bulk-ready.
-

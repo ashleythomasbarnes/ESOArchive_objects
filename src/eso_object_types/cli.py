@@ -9,6 +9,7 @@ from .database import Database
 from .models import RunConfig
 from .pipeline import Pipeline
 from .reports import export_run
+from .resolution import rebuild_best_objects
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--limit", type=int, default=50)
     run.add_argument("--min-radius-arcsec", type=float, default=1.0)
     run.add_argument("--simbad-batch-size", type=int, default=50_000)
+    run.add_argument("--simbad-alias-batch-size", type=int, default=10_000)
     run.add_argument("--ned-batch-size", type=int, default=50)
     run.add_argument("--retries", type=int, default=5)
     run.add_argument("--database", default="output/eso_object_types.sqlite")
@@ -52,6 +54,7 @@ def run_command(args: argparse.Namespace) -> int:
         limit=args.limit,
         min_radius_arcsec=args.min_radius_arcsec,
         simbad_batch_size=args.simbad_batch_size,
+        simbad_alias_batch_size=args.simbad_alias_batch_size,
         ned_batch_size=args.ned_batch_size,
         retries=args.retries,
         eso_endpoint=args.eso_endpoint,
@@ -81,6 +84,7 @@ def report_command(args: argparse.Namespace) -> int:
         if row is None:
             raise ValueError(f"run {run_id!r} does not exist")
         config = RunConfig.from_dict(json.loads(row["config_json"]))
+        rebuild_best_objects(database, run_id)
         path, summary = export_run(
             database.connection,
             run_id,
@@ -108,4 +112,3 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     parser.error(f"unknown command: {args.command}")
     return 2
-

@@ -27,6 +27,15 @@ def test_live_two_spectrum_smoke(tmp_path) -> None:
         run_id, exit_code, summary = Pipeline(database, config).run()
         assert exit_code == 0, f"live run {run_id} was partial"
         assert summary["observations"] == 2
+        assert summary["best_object_rows"] == 2
+        assert database.connection.execute(
+            """
+            SELECT COUNT(*) FROM observation_best_objects
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()[0] == 2
+        assert database.uncached_simbad_object_ids_for_run(run_id) == []
         assert database.connection.execute(
             """
             SELECT COUNT(*)
@@ -37,4 +46,3 @@ def test_live_two_spectrum_smoke(tmp_path) -> None:
         ).fetchone()[0] == 0
     finally:
         database.close()
-

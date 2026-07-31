@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import csv
 import json
 
 from eso_object_types.database import Database
 from eso_object_types.geometry import healpix_order10
 from eso_object_types.models import (
     BatchResult,
+    CatalogAlias,
     CatalogObject,
     ObjectMatch,
     Observation,
@@ -82,6 +84,14 @@ class FakeCatalog:
 class FakeSimbad(FakeCatalog):
     catalog = "simbad"
     calls = 0
+    alias_calls = 0
+
+    def query_aliases(self, object_ids):
+        type(self).alias_calls += 1
+        return tuple(
+            CatalogAlias("simbad", object_id, object_id)
+            for object_id in object_ids
+        )
 
 
 class FakeNed(FakeCatalog):
@@ -98,8 +108,18 @@ class FailingNed(FakeCatalog):
         raise TimeoutError("simulated timeout")
 
 
+class FailingAliasSimbad(FakeSimbad):
+    calls = 0
+    alias_calls = 0
+
+    def query_aliases(self, object_ids):
+        type(self).alias_calls += 1
+        raise TimeoutError("simulated alias timeout")
+
+
 def test_pipeline_batches_exports_and_is_idempotent(tmp_path) -> None:
     FakeEso.calls = FakeSimbad.calls = FakeNed.calls = 0
+    FakeSimbad.alias_calls = 0
     database = Database(tmp_path / "prototype.sqlite")
     config = RunConfig(
         limit=3,
@@ -124,6 +144,7 @@ def test_pipeline_batches_exports_and_is_idempotent(tmp_path) -> None:
         assert summary["observation_object_links"] == 6
         assert FakeEso.calls == 1
         assert FakeSimbad.calls == 2
+        assert FakeSimbad.alias_calls == 1
         assert FakeNed.calls == 2
 
         run_id_again, code, _ = pipeline.run(resume_run=run_id)
@@ -131,6 +152,7 @@ def test_pipeline_batches_exports_and_is_idempotent(tmp_path) -> None:
         assert code == 0
         assert FakeEso.calls == 1
         assert FakeSimbad.calls == 2
+        assert FakeSimbad.alias_calls == 1
         assert FakeNed.calls == 2
 
         export_dir = tmp_path / "output" / run_id
@@ -138,7 +160,58 @@ def test_pipeline_batches_exports_and_is_idempotent(tmp_path) -> None:
         assert (export_dir / "catalog_objects.csv").exists()
         assert (export_dir / "object_types.csv").exists()
         assert (export_dir / "observation_objects.csv").exists()
+        assert (export_dir / "observation_best_objects.csv").exists()
+        assert (export_dir / "observation_best_object_members.csv").exists()
+        assert (export_dir / "catalog_object_aliases.csv").exists()
         assert (export_dir / "run_summary.csv").exists()
+        assert summary["best_object_rows"] == 3
+        assert summary["best_object_cross_catalog"] == 3
+        assert summary["best_object_cross_catalog_agreement"] == 3
+        with (export_dir / "observation_best_objects.csv").open(
+            newline="", encoding="utf-8"
+        ) as stream:
+            best_rows = list(csv.DictReader(stream))
+        assert len(best_rows) == 3
+        assert {
+            "target_name",
+            "best_object_key",
+            "best_object_name",
+            "broad_category",
+            "subcategory",
+            "classification_detail",
+            "confidence",
+            "match_method",
+            "separation_arcsec",
+            "normalized_separation",
+            "candidate_group_count",
+            "runner_up_margin",
+            "supporting_catalogs",
+            "raw_catalog_types",
+            "ranking_version",
+            "taxonomy_version",
+        } <= set(best_rows[0])
+        with (export_dir / "observation_best_object_members.csv").open(
+            newline="", encoding="utf-8"
+        ) as stream:
+            member_rows = list(csv.DictReader(stream))
+        assert {
+            "run_id",
+            "eso_dp_id",
+            "catalog",
+            "catalog_object_id",
+            "member_role",
+        } <= set(member_rows[0])
+        with (export_dir / "catalog_object_aliases.csv").open(
+            newline="", encoding="utf-8"
+        ) as stream:
+            alias_rows = list(csv.DictReader(stream))
+        assert {
+            "catalog",
+            "catalog_object_id",
+            "alias",
+            "normalized_alias",
+            "updated_at",
+        } <= set(alias_rows[0])
         log_lines = (tmp_path / "output" / "logs" / f"{run_id}.jsonl").read_text()
         assert '"event": "batch_complete"' in log_lines
         assert '"event": "batch_skip"' in log_lines
@@ -148,6 +221,7 @@ def test_pipeline_batches_exports_and_is_idempotent(tmp_path) -> None:
 
 def test_partial_run_resumes_only_failed_batches(tmp_path) -> None:
     FakeEso.calls = FakeSimbad.calls = FakeNed.calls = FailingNed.calls = 0
+    FakeSimbad.alias_calls = 0
     database = Database(tmp_path / "prototype.sqlite")
     config = RunConfig(
         limit=2,
@@ -194,3 +268,48 @@ def test_partial_run_resumes_only_failed_batches(tmp_path) -> None:
     finally:
         database.close()
 
+
+def test_partial_alias_stage_is_resumable_and_rebuilds_confidence(tmp_path) -> None:
+    FakeEso.calls = FakeNed.calls = FakeSimbad.calls = 0
+    FakeSimbad.alias_calls = 0
+    FailingAliasSimbad.calls = FailingAliasSimbad.alias_calls = 0
+    database = Database(tmp_path / "prototype.sqlite")
+    config = RunConfig(
+        limit=1,
+        simbad_batch_size=10,
+        simbad_alias_batch_size=10,
+        ned_batch_size=10,
+        retries=2,
+        output_dir=str(tmp_path / "output"),
+    )
+    try:
+        first = Pipeline(
+            database,
+            config,
+            eso_factory=FakeEso,
+            simbad_factory=FailingAliasSimbad,
+            ned_factory=FakeNed,
+            sleep=lambda _: None,
+            random_source=lambda: 0.0,
+        )
+        run_id, code, summary = first.run()
+        assert code == 2
+        assert summary["best_object_incomplete_aliases"] == 1
+        assert FailingAliasSimbad.alias_calls == 2
+
+        resumed = Pipeline(
+            database,
+            config,
+            eso_factory=FakeEso,
+            simbad_factory=FakeSimbad,
+            ned_factory=FakeNed,
+            sleep=lambda _: None,
+            random_source=lambda: 0.0,
+        )
+        _, code, summary = resumed.run(resume_run=run_id)
+        assert code == 0
+        assert summary["best_object_incomplete_aliases"] == 0
+        assert database.uncached_simbad_object_ids_for_run(run_id) == []
+        assert FakeSimbad.alias_calls == 1
+    finally:
+        database.close()

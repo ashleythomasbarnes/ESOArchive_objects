@@ -76,6 +76,88 @@ def build_summary(
         """,
         (run_id,),
     ).fetchone()[0]
+    metrics["best_object_rows"] = connection.execute(
+        """
+        SELECT COUNT(*) FROM observation_best_objects WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()[0]
+    metrics["best_object_matches"] = connection.execute(
+        """
+        SELECT COUNT(*) FROM observation_best_objects
+        WHERE run_id = ? AND best_object_key IS NOT NULL
+        """,
+        (run_id,),
+    ).fetchone()[0]
+    metrics["best_object_cross_catalog"] = connection.execute(
+        """
+        SELECT COUNT(*) FROM observation_best_objects
+        WHERE run_id = ? AND supporting_catalogs = 'ned,simbad'
+        """,
+        (run_id,),
+    ).fetchone()[0]
+    metrics["best_object_cross_catalog_agreement"] = connection.execute(
+        """
+        SELECT COUNT(*) FROM observation_best_objects
+        WHERE run_id = ? AND supporting_catalogs = 'ned,simbad'
+          AND classification_conflict = 0
+        """,
+        (run_id,),
+    ).fetchone()[0]
+    metrics["best_object_classification_conflicts"] = connection.execute(
+        """
+        SELECT COUNT(*) FROM observation_best_objects
+        WHERE run_id = ? AND classification_conflict = 1
+        """,
+        (run_id,),
+    ).fetchone()[0]
+    metrics["best_object_incomplete_aliases"] = connection.execute(
+        """
+        SELECT COUNT(*) FROM observation_best_objects
+        WHERE run_id = ? AND alias_complete = 0
+        """,
+        (run_id,),
+    ).fetchone()[0]
+    metrics["simbad_alias_objects"] = connection.execute(
+        """
+        SELECT COUNT(DISTINCT co.catalog_object_id)
+        FROM catalog_objects AS co
+        JOIN (
+            SELECT DISTINCT oo.catalog, oo.catalog_object_id
+            FROM observation_objects AS oo
+            JOIN run_observations AS ro USING (eso_dp_id)
+            WHERE ro.run_id = ?
+        ) AS run_objects
+          ON run_objects.catalog = co.catalog
+         AND run_objects.catalog_object_id = co.catalog_object_id
+        WHERE co.catalog = 'simbad'
+          AND (
+              co.aliases_retrieved_at IS NOT NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM catalog_object_aliases AS cached_alias
+                  WHERE cached_alias.catalog = co.catalog
+                    AND cached_alias.catalog_object_id = co.catalog_object_id
+              )
+          )
+        """,
+        (run_id,),
+    ).fetchone()[0]
+    metrics["simbad_alias_rows"] = connection.execute(
+        """
+        SELECT COUNT(DISTINCT ca.catalog_object_id || ':' || ca.alias)
+        FROM catalog_object_aliases AS ca
+        JOIN (
+            SELECT DISTINCT oo.catalog, oo.catalog_object_id
+            FROM observation_objects AS oo
+            JOIN run_observations AS ro USING (eso_dp_id)
+            WHERE ro.run_id = ?
+        ) AS run_objects
+          ON run_objects.catalog = ca.catalog
+         AND run_objects.catalog_object_id = ca.catalog_object_id
+        """,
+        (run_id,),
+    ).fetchone()[0]
 
     calls = connection.execute(
         """
@@ -107,6 +189,28 @@ def build_summary(
     ).fetchall()
     for catalog, type_code, count in type_rows:
         metrics[f"type_links.{catalog}.{type_code}"] = count
+
+    for confidence, count in connection.execute(
+        """
+        SELECT confidence, COUNT(*)
+        FROM observation_best_objects
+        WHERE run_id = ?
+        GROUP BY confidence
+        """,
+        (run_id,),
+    ):
+        metrics[f"best_confidence.{confidence}"] = count
+
+    for category, count in connection.execute(
+        """
+        SELECT broad_category, COUNT(*)
+        FROM observation_best_objects
+        WHERE run_id = ?
+        GROUP BY broad_category
+        """,
+        (run_id,),
+    ):
+        metrics[f"best_category.{category}"] = count
 
     observed = max(int(metrics["observations"]), 1)
     unique_fraction = metrics["unique_search_positions"] / observed
@@ -170,6 +274,33 @@ def export_run(
             WHERE r.run_id = ?
             ORDER BY ot.catalog, ot.type_code
         """,
+        "observation_best_objects.csv": """
+            SELECT o.target_name, bo.*
+            FROM observation_best_objects AS bo
+            JOIN observations AS o USING (eso_dp_id)
+            WHERE bo.run_id = ?
+            ORDER BY bo.eso_dp_id
+        """,
+        "observation_best_object_members.csv": """
+            SELECT bom.*
+            FROM observation_best_object_members AS bom
+            WHERE bom.run_id = ?
+            ORDER BY bom.eso_dp_id, bom.member_role, bom.catalog,
+                     bom.catalog_object_id
+        """,
+        "catalog_object_aliases.csv": """
+            SELECT ca.*
+            FROM catalog_object_aliases AS ca
+            JOIN (
+                SELECT DISTINCT oo.catalog, oo.catalog_object_id
+                FROM observation_objects AS oo
+                JOIN run_observations AS ro USING (eso_dp_id)
+                WHERE ro.run_id = ?
+            ) AS run_objects
+              ON run_objects.catalog = ca.catalog
+             AND run_objects.catalog_object_id = ca.catalog_object_id
+            ORDER BY ca.catalog, ca.catalog_object_id, ca.alias
+        """,
     }
     for filename, query in exports.items():
         _write_query_csv(connection, destination / filename, query, (run_id,))
@@ -184,4 +315,3 @@ def export_run(
         writer.writerow(["metric", "value"])
         writer.writerows(sorted(summary.items()))
     return destination, summary
-

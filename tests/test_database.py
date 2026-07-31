@@ -97,3 +97,19 @@ def test_foreign_keys_reject_orphan_links(tmp_path) -> None:
     finally:
         database.close()
 
+
+def test_foreign_keys_reject_orphan_best_object_members(tmp_path) -> None:
+    database = Database(tmp_path / "test.sqlite")
+    try:
+        database.create_run("run-1", RunConfig())
+        with pytest.raises(sqlite3.IntegrityError):
+            with database.transaction() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO observation_best_object_members(
+                        run_id, eso_dp_id, catalog, catalog_object_id, member_role
+                    ) VALUES ('run-1', 'missing', 'ned', '1', 'primary')
+                    """
+                )
+    finally:
+        database.close()
