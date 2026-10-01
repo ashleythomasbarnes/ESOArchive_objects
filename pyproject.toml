@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "eso-object-types"
 version = "0.1.0"
-description = "Prototype ESO spectrum object-type enrichment using SIMBAD and NED"
+description = "Prototype ESO spectrum object-type enrichment using SIMBAD"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -29,8 +29,11 @@ eso-object-types = "eso_object_types.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+eso_object_types = ["dashboard_assets/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "live: contacts the live ESO, SIMBAD, and NED services",
+    "live: contacts the live ESO and SIMBAD services",
 ]

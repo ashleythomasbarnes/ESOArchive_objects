@@ -20,7 +20,6 @@ def test_live_two_spectrum_smoke(tmp_path) -> None:
         config = RunConfig(
             limit=2,
             simbad_batch_size=2,
-            ned_batch_size=2,
             retries=2,
             output_dir=str(tmp_path / "output"),
         )

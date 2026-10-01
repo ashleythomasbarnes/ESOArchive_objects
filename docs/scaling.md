@@ -19,25 +19,6 @@ permission to submit millions of public catalog requests.
 - Order-10 nested HEALPix identifiers are stored with ESO observations for
   later partitioning.
 
-## NED is the production gate
-
-NED's current TAP capabilities advertise positional ADQL queries but not TAP
-table upload. Combining 50 cones per query is appropriate for a small
-prototype, but the resulting request count is still too large for two million
-spectra.
-
-Before a production run, agree one of these access patterns with NED:
-
-1. Obtain a versioned bulk snapshot of the NED object directory and perform
-   the spatial join inside the ESO processing environment.
-2. Obtain explicit approval for a bounded bulk workflow.
-3. If neither is available, create a persistent sky-tile cache. Fetch each
-   required tile once with asynchronous TAP, store the catalog version and
-   retrieval time, and match all overlapping ESO products locally.
-
-A bulk snapshot is preferred because it makes runtime, catalog version,
-reproducibility, and service load explicit.
-
 ## Production architecture
 
 - Move the schema to PostgreSQL with spatial or Q3C/pgSphere indexing.
@@ -53,5 +34,5 @@ reproducibility, and service load explicit.
   correct footprint. Where available, migrate from cones to `s_region`.
 
 Each prototype `run_summary.csv` estimates the number of unique positions and
-the number of SIMBAD and NED batches implied by two million spectra. The NED
-estimate is diagnostic only and is labelled as not bulk-ready.
+the number of SIMBAD batches implied by two million spectra. This extrapolation
+is a batch-count estimate, not a measured production runtime.

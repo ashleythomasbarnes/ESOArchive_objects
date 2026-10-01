@@ -57,8 +57,8 @@ def test_consolidation_keeps_all_observation_ids() -> None:
     assert len(targets) == 2
     assert targets[0].observation_ids == ("A", "B")
     assert targets[1].observation_ids == ("C",)
-    assert batch_hash("ned", targets) == batch_hash("ned", targets)
-    assert batch_hash("ned", targets) != batch_hash("simbad", targets)
+    assert batch_hash("simbad", targets) == batch_hash("simbad", targets)
+    assert batch_hash("simbad", targets) != batch_hash("eso", targets)
 
 
 def test_healpix_is_deterministic_and_in_range() -> None:

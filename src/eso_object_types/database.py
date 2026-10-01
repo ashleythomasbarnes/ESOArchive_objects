@@ -68,7 +68,6 @@ CREATE TABLE IF NOT EXISTS catalog_objects (
     ra_deg REAL NOT NULL,
     dec_deg REAL NOT NULL,
     primary_type_code TEXT,
-    catalog_type_key TEXT,
     spectral_type TEXT,
     morphological_type TEXT,
     aliases_retrieved_at TEXT,
@@ -120,7 +119,6 @@ CREATE TABLE IF NOT EXISTS observation_best_objects (
     runner_up_margin REAL,
     supporting_catalogs TEXT,
     raw_catalog_types TEXT,
-    classification_conflict INTEGER NOT NULL,
     alias_complete INTEGER NOT NULL,
     ranking_version TEXT NOT NULL,
     taxonomy_version TEXT NOT NULL,
@@ -189,6 +187,14 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
+        expected_columns = set(BestObject.__dataclass_fields__) | {"updated_at"}
+        existing_columns = self._column_names("observation_best_objects")
+        if existing_columns and existing_columns != expected_columns:
+            self.connection.close()
+            raise ValueError(
+                f"database {self.path} has an incompatible best-object schema; "
+                "use a fresh database with --database output/simbad_only.sqlite"
+            )
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA journal_mode = WAL")
         self.connection.executescript(SCHEMA)
@@ -487,15 +493,14 @@ class Database:
                     """
                     INSERT INTO catalog_objects(
                         catalog, catalog_object_id, preferred_name, ra_deg, dec_deg,
-                        primary_type_code, catalog_type_key, spectral_type,
+                        primary_type_code, spectral_type,
                         morphological_type, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(catalog, catalog_object_id) DO UPDATE SET
                         preferred_name = excluded.preferred_name,
                         ra_deg = excluded.ra_deg,
                         dec_deg = excluded.dec_deg,
                         primary_type_code = excluded.primary_type_code,
-                        catalog_type_key = excluded.catalog_type_key,
                         spectral_type = excluded.spectral_type,
                         morphological_type = excluded.morphological_type,
                         updated_at = excluded.updated_at
@@ -507,7 +512,6 @@ class Database:
                         obj.ra_deg,
                         obj.dec_deg,
                         obj.primary_type_code,
-                        obj.catalog_type_key,
                         obj.spectral_type,
                         obj.morphological_type,
                         now,
@@ -667,10 +671,10 @@ class Database:
                         separation_arcsec, normalized_separation,
                         candidate_group_count, runner_up_margin,
                         supporting_catalogs, raw_catalog_types,
-                        classification_conflict, alias_complete,
+                        alias_complete,
                         ranking_version, taxonomy_version, updated_at
                     ) VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -690,7 +694,6 @@ class Database:
                         best.runner_up_margin,
                         best.supporting_catalogs,
                         best.raw_catalog_types,
-                        int(best.classification_conflict),
                         int(best.alias_complete),
                         best.ranking_version,
                         best.taxonomy_version,

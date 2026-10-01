@@ -94,18 +94,14 @@ class FakeSimbad(FakeCatalog):
         )
 
 
-class FakeNed(FakeCatalog):
-    catalog = "ned"
-    calls = 0
-
-
-class FailingNed(FakeCatalog):
-    catalog = "ned"
+class FailingSimbad(FakeSimbad):
     calls = 0
 
     def query_batch(self, targets):
-        type(self).calls += 1
-        raise TimeoutError("simulated timeout")
+        if targets[0].ra_deg == 12.0:
+            type(self).calls += 1
+            raise TimeoutError("simulated timeout")
+        return super().query_batch(targets)
 
 
 class FailingAliasSimbad(FakeSimbad):
@@ -118,13 +114,12 @@ class FailingAliasSimbad(FakeSimbad):
 
 
 def test_pipeline_batches_exports_and_is_idempotent(tmp_path) -> None:
-    FakeEso.calls = FakeSimbad.calls = FakeNed.calls = 0
+    FakeEso.calls = FakeSimbad.calls = 0
     FakeSimbad.alias_calls = 0
     database = Database(tmp_path / "prototype.sqlite")
     config = RunConfig(
         limit=3,
         simbad_batch_size=2,
-        ned_batch_size=2,
         retries=2,
         output_dir=str(tmp_path / "output"),
     )
@@ -134,18 +129,16 @@ def test_pipeline_batches_exports_and_is_idempotent(tmp_path) -> None:
             config,
             eso_factory=FakeEso,
             simbad_factory=FakeSimbad,
-            ned_factory=FakeNed,
             sleep=lambda _: None,
             random_source=lambda: 0.0,
         )
         run_id, code, summary = pipeline.run()
         assert code == 0
         assert summary["observations"] == 3
-        assert summary["observation_object_links"] == 6
+        assert summary["observation_object_links"] == 3
         assert FakeEso.calls == 1
         assert FakeSimbad.calls == 2
         assert FakeSimbad.alias_calls == 1
-        assert FakeNed.calls == 2
 
         run_id_again, code, _ = pipeline.run(resume_run=run_id)
         assert run_id_again == run_id
@@ -153,7 +146,6 @@ def test_pipeline_batches_exports_and_is_idempotent(tmp_path) -> None:
         assert FakeEso.calls == 1
         assert FakeSimbad.calls == 2
         assert FakeSimbad.alias_calls == 1
-        assert FakeNed.calls == 2
 
         export_dir = tmp_path / "output" / run_id
         assert (export_dir / "observations.csv").exists()
@@ -165,13 +157,22 @@ def test_pipeline_batches_exports_and_is_idempotent(tmp_path) -> None:
         assert (export_dir / "catalog_object_aliases.csv").exists()
         assert (export_dir / "run_summary.csv").exists()
         assert summary["best_object_rows"] == 3
-        assert summary["best_object_cross_catalog"] == 3
-        assert summary["best_object_cross_catalog_agreement"] == 3
+        assert {
+            row[0] for row in database.connection.execute(
+                "SELECT DISTINCT catalog FROM catalog_objects"
+            )
+        } == {"simbad"}
+        assert {
+            row[0] for row in database.connection.execute(
+                "SELECT DISTINCT service FROM service_calls"
+            )
+        } == {"eso", "simbad", "simbad_alias"}
         with (export_dir / "observation_best_objects.csv").open(
             newline="", encoding="utf-8"
         ) as stream:
             best_rows = list(csv.DictReader(stream))
         assert len(best_rows) == 3
+        assert all(row["supporting_catalogs"] == "simbad" for row in best_rows)
         assert {
             "target_name",
             "best_object_key",
@@ -201,6 +202,9 @@ def test_pipeline_batches_exports_and_is_idempotent(tmp_path) -> None:
             "catalog_object_id",
             "member_role",
         } <= set(member_rows[0])
+        assert len(member_rows) == 3
+        assert all(row["catalog"] == "simbad" for row in member_rows)
+        assert all(row["member_role"] == "primary" for row in member_rows)
         with (export_dir / "catalog_object_aliases.csv").open(
             newline="", encoding="utf-8"
         ) as stream:
@@ -220,13 +224,12 @@ def test_pipeline_batches_exports_and_is_idempotent(tmp_path) -> None:
 
 
 def test_partial_run_resumes_only_failed_batches(tmp_path) -> None:
-    FakeEso.calls = FakeSimbad.calls = FakeNed.calls = FailingNed.calls = 0
+    FakeEso.calls = FakeSimbad.calls = FailingSimbad.calls = 0
     FakeSimbad.alias_calls = 0
     database = Database(tmp_path / "prototype.sqlite")
     config = RunConfig(
-        limit=2,
-        simbad_batch_size=10,
-        ned_batch_size=10,
+        limit=3,
+        simbad_batch_size=2,
         retries=2,
         output_dir=str(tmp_path / "output"),
     )
@@ -235,15 +238,14 @@ def test_partial_run_resumes_only_failed_batches(tmp_path) -> None:
             database,
             config,
             eso_factory=FakeEso,
-            simbad_factory=FakeSimbad,
-            ned_factory=FailingNed,
+            simbad_factory=FailingSimbad,
             sleep=lambda _: None,
             random_source=lambda: 0.0,
         )
         run_id, code, _ = first.run()
         assert code == 2
-        assert FailingNed.calls == 2
-        assert FakeSimbad.calls == 1
+        assert FailingSimbad.calls == 3
+        assert FakeSimbad.calls == 0
         assert database.get_run(run_id)["status"] == "partial"
 
         resumed = Pipeline(
@@ -251,26 +253,24 @@ def test_partial_run_resumes_only_failed_batches(tmp_path) -> None:
             config,
             eso_factory=FakeEso,
             simbad_factory=FakeSimbad,
-            ned_factory=FakeNed,
             sleep=lambda _: None,
             random_source=lambda: 0.0,
         )
         _, code, summary = resumed.run(resume_run=run_id)
         assert code == 0
-        assert summary["observation_object_links"] == 4
+        assert summary["observation_object_links"] == 3
         assert FakeEso.calls == 1
         assert FakeSimbad.calls == 1
-        assert FakeNed.calls == 1
         assert database.get_run(run_id)["status"] == "completed"
 
         config_json = json.loads(database.get_run(run_id)["config_json"])
-        assert config_json["limit"] == 2
+        assert config_json["limit"] == 3
     finally:
         database.close()
 
 
 def test_partial_alias_stage_is_resumable_and_rebuilds_confidence(tmp_path) -> None:
-    FakeEso.calls = FakeNed.calls = FakeSimbad.calls = 0
+    FakeEso.calls = FakeSimbad.calls = 0
     FakeSimbad.alias_calls = 0
     FailingAliasSimbad.calls = FailingAliasSimbad.alias_calls = 0
     database = Database(tmp_path / "prototype.sqlite")
@@ -278,7 +278,6 @@ def test_partial_alias_stage_is_resumable_and_rebuilds_confidence(tmp_path) -> N
         limit=1,
         simbad_batch_size=10,
         simbad_alias_batch_size=10,
-        ned_batch_size=10,
         retries=2,
         output_dir=str(tmp_path / "output"),
     )
@@ -288,7 +287,6 @@ def test_partial_alias_stage_is_resumable_and_rebuilds_confidence(tmp_path) -> N
             config,
             eso_factory=FakeEso,
             simbad_factory=FailingAliasSimbad,
-            ned_factory=FakeNed,
             sleep=lambda _: None,
             random_source=lambda: 0.0,
         )
@@ -302,7 +300,6 @@ def test_partial_alias_stage_is_resumable_and_rebuilds_confidence(tmp_path) -> N
             config,
             eso_factory=FakeEso,
             simbad_factory=FakeSimbad,
-            ned_factory=FakeNed,
             sleep=lambda _: None,
             random_source=lambda: 0.0,
         )

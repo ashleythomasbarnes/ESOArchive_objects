@@ -2,7 +2,7 @@
 
 This prototype finds catalogued astronomical objects inside the footprints of
 ESO reduced spectra. It queries ESO for spectrum metadata, searches the same
-positions in SIMBAD and NED, then stores the object names, object types, and
+positions in SIMBAD, then stores the object names, object types, and
 object-to-spectrum links in SQLite and CSV files.
 
 The workflow uses metadata only. It does not download the spectral FITS files
@@ -54,6 +54,47 @@ the interpretation notebook:
 ```bash
 jupyter lab notebooks/interpret_outputs.ipynb
 ```
+
+## Local dashboard
+
+Start the read-only spectrum monitor from the repository root:
+
+```bash
+eso-object-types dashboard
+```
+
+Open <http://127.0.0.1:8765>. The single-page dashboard shows the latest run's
+health, results and classifications, an Aladin sky viewer, searchable spectrum
+results, filtered CSV downloads, and run/batch diagnostics. Light and dark themes
+are available. Aladin imagery requires internet access and WebGL; the other
+results remain usable if the sky viewer is unavailable.
+
+The database view refreshes every 30 seconds and follows new manual runs.
+Refreshing the dashboard never runs the pipeline or queries ESO/SIMBAD.
+Historical runs are selectable, while the health strip always reports the latest
+run. Raw catalogue metadata and candidate links reflect the current database;
+best classifications are stored per run.
+
+To read another database, supply its path (an absolute path works from any
+launch directory), or choose another local port:
+
+```bash
+eso-object-types dashboard --database /absolute/path/to/eso_object_types.sqlite --port 8765
+```
+
+Manual mode shows data age without overdue warnings. Once a separate scheduler
+runs the pipeline daily, enable warnings when no successful run has completed
+within 24 hours plus a two-hour grace period:
+
+```bash
+eso-object-types dashboard --expected-interval-hours 24
+```
+
+This option monitors freshness only; it does not schedule ingestion. Service
+health reflects recorded calls, not live availability or worker liveness.
+Plots show the selected run, and cumulative database totals are labelled
+separately. A future incremental pipeline will need a cumulative results view.
+The dashboard never creates or migrates the database. Stop the server with Ctrl+C.
 
 ## How the method works
 
@@ -110,32 +151,7 @@ batches and cached in the database. They allow names such as `M 31` and
 `NGC 224` to be recognised as names for the same object without adding one
 query per spectrum.
 
-### 3. Search NED
-
-The pipeline queries NED's `NEDTAP.objdir` table for the object identifier,
-preferred name, coordinates, preferred physical type, and type key.
-
-NED's public TAP service does not advertise the uploaded-table capability used
-for SIMBAD. The prototype therefore builds one ADQL query containing an
-explicit `OR` list of cone predicates, submits it as an asynchronous TAP job,
-and defaults to 50 cones per request. It then rechecks the returned coordinates
-against each search cone locally to construct the correct object-to-spectrum
-links.
-
-The smaller NED batch is a practical bound on query length and public-service
-load, not a statement that NED contains fewer objects. With 5,000 unique input
-positions, the defaults produce:
-
-- one SIMBAD request, because 5,000 is below its 50,000-row upload batch; and
-- 100 NED requests, because each request contains 50 cone predicates.
-
-The NED workflow is suitable for a bounded prototype run. A production run
-over millions of spectra needs an approved bulk-access method or a local,
-versioned copy of the relevant catalog data. See
-[the ESO archive feature plan](docs/eso_archive_feature_plan.md) and
-[the scaling notes](docs/scaling.md).
-
-### 4. Choose one best object
+### 3. Choose one best object
 
 All positional matches are retained, but the pipeline also produces one
 best-object row for each ESO spectrum. It first compares the ESO target name
@@ -143,18 +159,16 @@ with SIMBAD preferred names and alternate identifiers. Recognised trailing
 annotations such as `_offset` are removed only to create an additional name
 variant; the original target name is preserved.
 
-SIMBAD and NED records are combined only when the NED preferred name matches a
-SIMBAD preferred name or alternate identifier. Nearby records are not combined
-using position alone. The physical-object candidates are ranked by:
+Each SIMBAD object is a separate candidate, ranked by:
 
 1. an exact match to the original target name;
 2. an exact match after removing a recognised trailing annotation;
 3. distance from the centre of the search region; and
-4. support from both catalogs and classification specificity.
+4. classification specificity, with a deterministic object-key tie-break.
 
 The selected object receives a broad category such as `Star`, `Galaxy`, or
-`Supernova`, followed by a more descriptive subcategory when the catalogs
-provide one. Stellar spectral type and galaxy morphology are retained as
+`Supernova`, followed by a more descriptive subcategory when SIMBAD
+provides one. Stellar spectral type and galaxy morphology are retained as
 details. A supernova subtype is reported only when it is actually available.
 The complete broad list is `Star`, `Galaxy`, `Supernova`, `Other transient`,
 `Nebula or ISM`, `Star cluster or association`, `Galaxy group or cluster`,
@@ -164,10 +178,10 @@ Every selected result includes `high`, `medium`, `low`, or `none` confidence.
 A low-confidence row is still the highest-ranked candidate; a row with no
 catalog candidate is reported as `Unknown` with `none` confidence.
 
-This stage uses the ESO, SIMBAD, and NED table results. It does not fetch FITS
+This stage uses the ESO and SIMBAD table results. It does not fetch FITS
 headers or make a separate SSA query.
 
-### 5. Store objects and spectrum links
+### 4. Store objects and spectrum links
 
 The same object may fall inside several ESO spectra, and each spectrum may
 contain several objects. The database therefore stores:
@@ -176,27 +190,27 @@ contain several objects. The database therefore stores:
 - each catalog object once per source catalog; and
 - a many-to-many link for every object and spectrum pairing.
 
-SIMBAD and NED records remain separate in the raw catalog tables. When their
-names identify the same physical source, the best-object tables link both raw
-records to one combined result. This preserves provenance while giving users
-one simple object classification.
+The best-object tables retain the selected SIMBAD record for provenance while
+giving users one simple object classification.
 
 Completed batches are recorded using deterministic hashes. Rerunning an
 unfinished run skips completed work, retries failed service calls, and avoids
 creating duplicate database records.
 
-## ESO, SIMBAD, and NED compared
+## ESO and SIMBAD compared
 
 | Service | Role in this pipeline | Table or tables searched | Query method | Default input batch |
 |---|---|---|---|---:|
 | ESO | Supplies the reduced-spectrum sample and footprint metadata | `ivoa.ObsCore` | One synchronous ADQL query using `SELECT TOP <limit>` | `--limit`, default 50 |
 | SIMBAD | Supplies catalog object names, alternate identifiers, and object types | `basic`, `otypedef`, `ident`, and uploaded tables | One spatial join plus cached alias batches | 50,000 positions; 10,000 alias objects |
-| NED | Supplies extragalactic object names and preferred physical types | `NEDTAP.objdir` | Asynchronous ADQL with an `OR` list of cones, followed by local separation checks | 50 positions |
 
-The ESO query chooses which spectra to process. The SIMBAD and NED positional
-queries independently search around the sky coordinates and radii derived
+The ESO query chooses which spectra to process. The SIMBAD positional
+query searches around the sky coordinates and radii derived
 from the ESO metadata. The ESO target name is compared with those returned
 records locally, after the catalog queries.
+
+Use a fresh database for this SIMBAD-only version; previous two-catalog runs
+are not supported.
 
 ## Run options
 
@@ -208,13 +222,11 @@ eso-object-types run \
   --min-radius-arcsec 1 \
   --simbad-batch-size 50000 \
   --simbad-alias-batch-size 10000 \
-  --ned-batch-size 50 \
   --retries 5 \
   --database output/eso_object_types.sqlite \
   --output-dir output \
   --eso-endpoint https://archive.eso.org/tap_obs \
-  --simbad-endpoint https://simbad.cds.unistra.fr/simbad/sim-tap \
-  --ned-endpoint https://ned.ipac.caltech.edu/tap
+  --simbad-endpoint https://simbad.cds.unistra.fr/simbad/sim-tap
 ```
 
 | Parameter | Default | Meaning |
@@ -223,14 +235,12 @@ eso-object-types run \
 | `--min-radius-arcsec` | `1` | Minimum cone radius in arcseconds. The actual radius is the larger of this value and half of ESO's `s_fov`. |
 | `--simbad-batch-size` | `50000` | Maximum number of consolidated search positions uploaded in one SIMBAD request. Valid values are 1 to 200,000. |
 | `--simbad-alias-batch-size` | `10000` | Maximum number of uncached SIMBAD object identifiers uploaded in one alias request. |
-| `--ned-batch-size` | `50` | Maximum number of cone predicates combined in one NED request. |
-| `--retries` | `5` | Maximum attempts for each ESO, SIMBAD, or NED service call. Retries use `Retry-After` when supplied, otherwise exponential backoff with jitter. |
+| `--retries` | `5` | Maximum attempts for each ESO or SIMBAD service call. Retries use `Retry-After` when supplied, otherwise exponential backoff with jitter. |
 | `--database` | `output/eso_object_types.sqlite` | SQLite database path. The database retains all runs and is the source of truth for reports. |
 | `--output-dir` | `output` | Parent directory for run-specific CSV exports and JSONL logs. |
 | `--resume-run RUN_ID` | none | Resume the named run using its stored configuration. Completed batches are skipped and unfinished or failed batches are attempted again. |
 | `--eso-endpoint` | ESO public TAP URL | ESO ObsCore TAP endpoint. |
 | `--simbad-endpoint` | SIMBAD TAP URL | SIMBAD TAP endpoint. The current Astroquery adapter requires an HTTPS URL ending in `/simbad/sim-tap`. |
-| `--ned-endpoint` | NED TAP URL | NED TAP endpoint used for asynchronous jobs. |
 
 For example, process 5,000 ESO spectra with:
 
@@ -238,7 +248,7 @@ For example, process 5,000 ESO spectra with:
 eso-object-types run --limit 5000
 ```
 
-This may take substantial time because NED is still queried in batches of 50.
+Larger runs may take substantial time, especially in crowded fields.
 Increase batch sizes cautiously and in accordance with the remote services'
 usage policies.
 
@@ -283,11 +293,11 @@ The complete relational database and source of truth. Its main tables are:
 | `observations` | One row per ESO data product |
 | `run_observations` | ESO products included in each run |
 | `object_types` | Normalized type codes and labels, kept separate by catalog |
-| `catalog_objects` | Unique SIMBAD or NED objects |
+| `catalog_objects` | Unique SIMBAD objects |
 | `catalog_object_aliases` | Cached alternate identifiers for SIMBAD objects |
 | `observation_objects` | Many-to-many object-to-spectrum links and separations |
 | `observation_best_objects` | One selected object and canonical classification per spectrum and run |
-| `observation_best_object_members` | SIMBAD and NED records supporting each selected object |
+| `observation_best_object_members` | SIMBAD records supporting each selected object |
 | `service_calls` | Batch inputs, attempts, timings, status, and failures |
 
 ### `output/<run_id>/observations.csv`
@@ -310,25 +320,21 @@ searched for each one.
 
 One row per unique catalog object linked to an observation in this run.
 Important columns are the source `catalog`, `catalog_object_id`,
-`preferred_name`, coordinates, `primary_type_code`, and NED
-`catalog_type_key`. SIMBAD rows also include spectral type and galaxy
-morphology when available.
+`preferred_name`, coordinates, and `primary_type_code`. Rows also include
+spectral type and galaxy morphology when available.
 
-Use this file to inspect the objects returned by SIMBAD and NED.
+Use this file to inspect the objects returned by SIMBAD.
 
 ### `output/<run_id>/object_types.csv`
 
 One row per distinct primary type used by the matched objects. SIMBAD provides
-a type code, readable label, and description. NED currently provides its
-preferred physical-type code as both the code and label, without a separate
-description.
+a type code, readable label, and description.
 
 Use this file to decode the classifications in `catalog_objects.csv`.
 
 ### `output/<run_id>/catalog_object_aliases.csv`
 
-The cached alternate SIMBAD identifiers used for target-name matching and
-SIMBAD/NED reconciliation. This file makes naming conversions such as
+The cached alternate SIMBAD identifiers used for target-name matching. This file makes naming conversions such as
 Messier-to-NGC matches auditable.
 
 ### `output/<run_id>/observation_objects.csv`
@@ -350,21 +356,19 @@ confidence, name-matching method, normalized separation, candidate count,
 supporting catalogs, and raw catalog types.
 
 The broad category is intentionally simple. More specific information remains
-in `subcategory`, `classification_detail`, and the raw catalog outputs. If the
-catalog classifications conflict, the broad category is `Unknown` and the
-confidence is `low`.
+in `subcategory`, `classification_detail`, and the raw catalog outputs.
 
 ### `output/<run_id>/observation_best_object_members.csv`
 
-The SIMBAD and NED records supporting the selected object. Join this file to
+The SIMBAD records supporting the selected object. Join this file to
 `catalog_objects.csv` to inspect the original names, positions, and types used
-to create the combined result.
+to create the selected result.
 
 ### `output/<run_id>/run_summary.csv`
 
 A two-column summary of observation counts, unique search positions, matched
 and unmatched observations, catalog objects, links, service calls, timings,
-counts by raw and best-object type, confidence and catalog-agreement counts,
+counts by raw and best-object type, confidence counts,
 alias-cache metrics, and an extrapolation to two million spectra.
 
 ### `output/logs/<run_id>.jsonl`
@@ -382,15 +386,14 @@ circular search region used for that ESO spectrum. It does not establish that:
 - the object was the observer's intended target;
 - the object contributes significant flux;
 - the catalog classification is complete or current; or
-- nearby SIMBAD and NED entries are different physical sources.
+- nearby SIMBAD entries are different physical sources.
 
 The current `max(s_fov / 2, minimum radius)` cone is a simplified prototype
 footprint. A production system should validate `s_fov` by instrument and
 product type and use the full ESO `s_region` geometry where appropriate.
 
-A spectrum with no SIMBAD or NED match is a valid result. It may reflect a
-small footprint, catalog scope or coverage, coordinate differences, or NED's
-focus on extragalactic objects.
+A spectrum with no SIMBAD match is a valid result. It may reflect a
+small footprint, catalog scope or coverage, or coordinate differences.
 
 The best-object result is a reproducible ranking of catalog metadata, not proof
 that the selected object was detected in the spectrum. The complete raw match
@@ -413,7 +416,7 @@ Run the offline test suite, which uses mock services:
 python -m pytest
 ```
 
-Run the optional two-spectrum live test against ESO, SIMBAD, and NED:
+Run the optional two-spectrum live test against ESO and SIMBAD:
 
 ```bash
 RUN_LIVE_TESTS=1 python -m pytest -m live -v

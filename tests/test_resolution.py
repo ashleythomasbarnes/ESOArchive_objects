@@ -106,7 +106,7 @@ def test_target_name_normalization_and_suffixes() -> None:
     )
 
 
-def test_alias_match_combines_ned_and_simbad(tmp_path) -> None:
+def test_alias_match_selects_simbad_object(tmp_path) -> None:
     database = Database(tmp_path / "test.sqlite")
     try:
         database.create_run("run-1", RunConfig())
@@ -131,23 +131,6 @@ def test_alias_match_combines_ned_and_simbad(tmp_path) -> None:
             ],
             [0.2],
         )
-        save_catalog(
-            database,
-            "ned",
-            [
-                CatalogObject(
-                    catalog="ned",
-                    catalog_object_id="200",
-                    preferred_name="NGC 224",
-                    ra_deg=10.00001,
-                    dec_deg=-20.0,
-                    primary_type_code="G",
-                    primary_type_label="G",
-                    primary_type_description=None,
-                )
-            ],
-            [0.22],
-        )
         save_aliases(
             database,
             ["100"],
@@ -163,13 +146,13 @@ def test_alias_match_combines_ned_and_simbad(tmp_path) -> None:
         assert row["classification_detail"] == "SA(s)b"
         assert row["match_method"] == "target_name_base"
         assert row["confidence"] == "high"
-        assert row["supporting_catalogs"] == "ned,simbad"
+        assert row["supporting_catalogs"] == "simbad"
         assert row["candidate_group_count"] == 1
         assert (
             database.connection.execute(
                 "SELECT COUNT(*) FROM observation_best_object_members"
             ).fetchone()[0]
-            == 2
+            == 1
         )
     finally:
         database.close()
@@ -217,7 +200,7 @@ def test_existing_alias_row_is_a_complete_cache_entry(tmp_path) -> None:
         database.close()
 
 
-def test_ambiguous_name_merge_uses_nearest_catalog_position(tmp_path) -> None:
+def test_shared_alias_selects_nearest_candidate(tmp_path) -> None:
     database = Database(tmp_path / "test.sqlite")
     try:
         database.create_run("run-1", RunConfig())
@@ -228,7 +211,7 @@ def test_ambiguous_name_merge_uses_nearest_catalog_position(tmp_path) -> None:
             [
                 CatalogObject(
                     catalog="simbad",
-                    catalog_object_id="near-ned",
+                    catalog_object_id="near",
                     preferred_name="SIMBAD A",
                     ra_deg=10.0,
                     dec_deg=-20.0,
@@ -239,7 +222,7 @@ def test_ambiguous_name_merge_uses_nearest_catalog_position(tmp_path) -> None:
                 ),
                 CatalogObject(
                     catalog="simbad",
-                    catalog_object_id="far-ned",
+                    catalog_object_id="far",
                     preferred_name="SIMBAD B",
                     ra_deg=10.00005,
                     dec_deg=-20.0,
@@ -251,29 +234,12 @@ def test_ambiguous_name_merge_uses_nearest_catalog_position(tmp_path) -> None:
             ],
             [0.1, 0.2],
         )
-        save_catalog(
-            database,
-            "ned",
-            [
-                CatalogObject(
-                    catalog="ned",
-                    catalog_object_id="ned-shared",
-                    preferred_name="Shared",
-                    ra_deg=10.00001,
-                    dec_deg=-20.0,
-                    primary_type_code="G",
-                    primary_type_label="G",
-                    primary_type_description=None,
-                )
-            ],
-            [0.12],
-        )
         save_aliases(
             database,
-            ["near-ned", "far-ned"],
+            ["near", "far"],
             [
-                CatalogAlias("simbad", "near-ned", "Shared"),
-                CatalogAlias("simbad", "far-ned", "Shared"),
+                CatalogAlias("simbad", "near", "Shared"),
+                CatalogAlias("simbad", "far", "Shared"),
             ],
         )
 
@@ -287,66 +253,8 @@ def test_ambiguous_name_merge_uses_nearest_catalog_position(tmp_path) -> None:
             """
         ).fetchall()
         assert [(item["catalog"], item["catalog_object_id"]) for item in members] == [
-            ("ned", "ned-shared"),
-            ("simbad", "near-ned"),
+            ("simbad", "near"),
         ]
-    finally:
-        database.close()
-
-
-def test_equal_catalog_positions_leave_name_merge_unresolved(tmp_path) -> None:
-    database = Database(tmp_path / "test.sqlite")
-    try:
-        database.create_run("run-1", RunConfig())
-        database.save_observations("run-1", [observation("_offset")])
-        save_catalog(
-            database,
-            "simbad",
-            [
-                CatalogObject(
-                    catalog="simbad",
-                    catalog_object_id=object_id,
-                    preferred_name=object_id,
-                    ra_deg=10.0,
-                    dec_deg=-20.0,
-                    primary_type_code="G",
-                    primary_type_label="Galaxy",
-                    primary_type_description="Galaxy",
-                    primary_type_path="G",
-                )
-                for object_id in ("first", "second")
-            ],
-            [0.1, 0.2],
-        )
-        save_catalog(
-            database,
-            "ned",
-            [
-                CatalogObject(
-                    catalog="ned",
-                    catalog_object_id="ned-shared",
-                    preferred_name="Shared",
-                    ra_deg=10.0,
-                    dec_deg=-20.0,
-                    primary_type_code="G",
-                    primary_type_label="G",
-                    primary_type_description=None,
-                )
-            ],
-            [0.05],
-        )
-        save_aliases(
-            database,
-            ["first", "second"],
-            [
-                CatalogAlias("simbad", "first", "Shared"),
-                CatalogAlias("simbad", "second", "Shared"),
-            ],
-        )
-
-        row = best_row(database)
-        assert row["candidate_group_count"] == 3
-        assert row["supporting_catalogs"] == "ned"
     finally:
         database.close()
 
@@ -423,16 +331,9 @@ def test_coordinate_only_neighbors_are_not_combined(tmp_path) -> None:
                     primary_type_label="Star",
                     primary_type_description="Star",
                     primary_type_path="*",
-                )
-            ],
-            [0.1],
-        )
-        save_catalog(
-            database,
-            "ned",
-            [
+                ),
                 CatalogObject(
-                    catalog="ned",
+                    catalog="simbad",
                     catalog_object_id="galaxy",
                     preferred_name="A galaxy",
                     ra_deg=10.0,
@@ -442,11 +343,11 @@ def test_coordinate_only_neighbors_are_not_combined(tmp_path) -> None:
                     primary_type_description=None,
                 )
             ],
-            [0.2],
+            [0.1, 0.2],
         )
         save_aliases(
             database,
-            ["star"],
+            ["star", "galaxy"],
             [CatalogAlias("simbad", "star", "A star")],
         )
         row = best_row(database)
@@ -454,60 +355,6 @@ def test_coordinate_only_neighbors_are_not_combined(tmp_path) -> None:
         assert row["candidate_group_count"] == 2
         assert row["supporting_catalogs"] == "simbad"
         assert row["match_method"] == "position"
-    finally:
-        database.close()
-
-
-def test_conflicting_combined_types_are_unknown_and_low_confidence(tmp_path) -> None:
-    database = Database(tmp_path / "test.sqlite")
-    try:
-        database.create_run("run-1", RunConfig())
-        database.save_observations("run-1", [observation("Shared")])
-        save_catalog(
-            database,
-            "simbad",
-            [
-                CatalogObject(
-                    catalog="simbad",
-                    catalog_object_id="star",
-                    preferred_name="Shared",
-                    ra_deg=10.0,
-                    dec_deg=-20.0,
-                    primary_type_code="*",
-                    primary_type_label="Star",
-                    primary_type_description="Star",
-                    primary_type_path="*",
-                )
-            ],
-            [0.1],
-        )
-        save_catalog(
-            database,
-            "ned",
-            [
-                CatalogObject(
-                    catalog="ned",
-                    catalog_object_id="galaxy",
-                    preferred_name="Shared",
-                    ra_deg=10.0,
-                    dec_deg=-20.0,
-                    primary_type_code="G",
-                    primary_type_label="G",
-                    primary_type_description=None,
-                )
-            ],
-            [0.1],
-        )
-        save_aliases(
-            database,
-            ["star"],
-            [CatalogAlias("simbad", "star", "Shared")],
-        )
-        row = best_row(database)
-        assert row["broad_category"] == "Unknown"
-        assert row["subcategory"] == "Conflicting catalog classifications"
-        assert row["classification_conflict"] == 1
-        assert row["confidence"] == "low"
     finally:
         database.close()
 
@@ -592,10 +439,10 @@ def test_equal_position_candidates_resolve_deterministically(tmp_path) -> None:
         database.save_observations("run-1", [observation("_offset")])
         save_catalog(
             database,
-            "ned",
+            "simbad",
             [
                 CatalogObject(
-                    catalog="ned",
+                    catalog="simbad",
                     catalog_object_id=object_id,
                     preferred_name=object_id,
                     ra_deg=10.0,
@@ -685,7 +532,6 @@ def test_schema_v1_database_is_migrated_in_place(tmp_path) -> None:
             ra_deg REAL NOT NULL,
             dec_deg REAL NOT NULL,
             primary_type_code TEXT,
-            catalog_type_key TEXT,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (catalog, catalog_object_id),
             FOREIGN KEY (catalog, primary_type_code)

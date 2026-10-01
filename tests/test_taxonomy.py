@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from eso_object_types.taxonomy import (
     classify_catalog_object,
-    combine_classifications,
 )
 
 
@@ -36,7 +35,7 @@ def test_stellar_spectral_type_adds_ob_subcategory() -> None:
     assert assertion.detail == "B0 V"
 
 
-def test_specific_galaxy_type_wins_over_generic_ned_type() -> None:
+def test_specific_galaxy_type_and_morphology() -> None:
     simbad = classify_catalog_object(
         row(
             primary_type_code="Sy1",
@@ -46,17 +45,9 @@ def test_specific_galaxy_type_wins_over_generic_ned_type() -> None:
             morphological_type="SBb",
         )
     )
-    ned = classify_catalog_object(
-        row(
-            catalog="ned",
-            primary_type_code="G",
-            type_label="G",
-        )
-    )
-    combined = combine_classifications([simbad, ned])
-    assert combined.broad_category == "Galaxy"
-    assert combined.subcategory == "Seyfert 1 Galaxy"
-    assert combined.detail == "SBb"
+    assert simbad.broad_category == "Galaxy"
+    assert simbad.subcategory == "Seyfert 1 Galaxy"
+    assert simbad.detail == "SBb"
 
 
 def test_supernova_candidate_and_missing_subtype_are_explicit() -> None:

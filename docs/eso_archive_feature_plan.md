@@ -19,14 +19,8 @@ and scaled independently.
 
 - Use SIMBAD's uploaded-table capability for large positional batches.
 - Do not send millions of independent queries.
-- For NED, obtain a versioned bulk snapshot or an explicitly approved bulk
-  workflow.
 - Preserve catalog identifiers, source catalog, retrieval date, and catalog
   version.
-
-NED's public TAP service does not advertise uploaded coordinate tables. The
-prototype's bounded cone batching is appropriate for testing, but not for an
-uncoordinated two-million-spectrum production run.
 
 ### 3. Perform the spatial matching near the archive database
 
@@ -41,7 +35,6 @@ uncoordinated two-million-spectrum production run.
 The archive interface or API could expose:
 
 - an object-type search field;
-- catalog selection, such as SIMBAD, NED, or both;
 - an option to show all objects inside the footprint;
 - object names and types in the result details; and
 - links back to the source catalog for provenance.
@@ -74,12 +67,11 @@ technical:
 
 1. Which ESO data-product types should be included first?
 2. What spatial footprint is authoritative for each product and instrument?
-3. Which external catalogs and object-type vocabularies should be exposed?
-4. Can NED provide or approve a bulk-access route?
-5. How often should external classifications be refreshed?
-6. Should the archive show all positional matches, likely main targets, or
+3. Which SIMBAD object-type vocabulary should be exposed?
+4. How often should external classifications be refreshed?
+5. Should the archive show all positional matches, likely main targets, or
    both?
-7. Which team owns ongoing catalog ingestion, quality control, and monitoring?
+6. Which team owns ongoing catalog ingestion, quality control, and monitoring?
 
 ## Suggested meeting walkthrough
 
@@ -89,12 +81,12 @@ For a short manager demonstration:
    footprint contains a supernova, galaxy, quasar, stellar object, or another
    catalogued object type?
 2. Explain that the prototype links ESO observations to independently
-   maintained SIMBAD and NED classifications.
+   maintained SIMBAD classifications.
 3. Show `run_summary.csv` from the latest test run.
 4. Open the notebook's object-type counts.
 5. Change the example filter to `simbad:SN*` and show the returned ESO spectra.
 6. Show the human-readable object list for each spectrum.
 7. Finish with the production steps and open decisions in this document.
 
-See [scaling.md](scaling.md) for more detail on service limits, the NED bulk
-access requirement, and a proposed production architecture.
+See [scaling.md](scaling.md) for more detail on service limits and a proposed
+production architecture.

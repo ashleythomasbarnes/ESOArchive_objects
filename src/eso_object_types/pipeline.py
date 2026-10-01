@@ -16,7 +16,7 @@ from .logging_utils import EventLogger
 from .models import BatchResult, Observation, RunConfig, SearchTarget
 from .reports import build_summary, export_run
 from .resolution import rebuild_best_objects
-from .services import EsoClient, NedClient, SimbadClient
+from .services import EsoClient, SimbadClient
 
 
 def new_run_id() -> str:
@@ -60,7 +60,6 @@ class Pipeline:
         config: RunConfig,
         eso_factory: Callable[[str], Any] = EsoClient,
         simbad_factory: Callable[[str], Any] = SimbadClient,
-        ned_factory: Callable[[str], Any] = NedClient,
         sleep: Callable[[float], None] = time.sleep,
         random_source: Callable[[], float] = random.random,
     ):
@@ -68,7 +67,6 @@ class Pipeline:
         self.config = config
         self.eso_factory = eso_factory
         self.simbad_factory = simbad_factory
-        self.ned_factory = ned_factory
         self.sleep = sleep
         self.random_source = random_source
 
@@ -408,16 +406,7 @@ class Pipeline:
                     client_factory=self.simbad_factory,
                     endpoint=self.config.simbad_endpoint,
                 )
-                ned_success = self._process_catalog(
-                    run_id=run_id,
-                    logger=logger,
-                    service="ned",
-                    targets=targets,
-                    batch_size=self.config.ned_batch_size,
-                    client_factory=self.ned_factory,
-                    endpoint=self.config.ned_endpoint,
-                )
-                catalogs_success = simbad_success and ned_success
+                catalogs_success = simbad_success
                 aliases_success = self._process_simbad_aliases(run_id, logger)
                 resolved_count = rebuild_best_objects(self.database, run_id)
                 logger.info(
@@ -435,7 +424,6 @@ class Pipeline:
                 self.database.connection,
                 run_id,
                 self.config.simbad_batch_size,
-                self.config.ned_batch_size,
             )
             self.database.finish_run(run_id, status, summary)
             export_path, summary = export_run(
@@ -443,7 +431,6 @@ class Pipeline:
                 run_id,
                 self.config.output_dir,
                 self.config.simbad_batch_size,
-                self.config.ned_batch_size,
             )
             logger.info(
                 "run_finish",

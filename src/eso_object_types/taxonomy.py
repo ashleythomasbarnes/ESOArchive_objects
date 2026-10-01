@@ -50,15 +50,6 @@ class TypeAssertion:
     is_candidate: bool
 
 
-@dataclass(frozen=True)
-class CombinedClassification:
-    broad_category: str
-    subcategory: str | None
-    detail: str | None
-    conflict: bool
-    specificity: int
-
-
 def _value(row: Any, name: str) -> Any:
     try:
         return row[name]
@@ -168,43 +159,4 @@ def classify_catalog_object(row: Any) -> TypeAssertion:
         detail=detail,
         specificity=specificity,
         is_candidate=is_candidate,
-    )
-
-
-def combine_classifications(
-    assertions: list[TypeAssertion],
-) -> CombinedClassification:
-    useful = [
-        item
-        for item in assertions
-        if item.broad_category not in {"Unknown", "Other"}
-    ]
-    categories = {item.broad_category for item in useful}
-    if len(categories) > 1:
-        return CombinedClassification(
-            broad_category="Unknown",
-            subcategory="Conflicting catalog classifications",
-            detail=None,
-            conflict=True,
-            specificity=0,
-        )
-
-    candidates = useful or assertions
-    if not candidates:
-        return CombinedClassification("Unknown", None, None, False, 0)
-
-    chosen = max(
-        candidates,
-        key=lambda item: (
-            item.specificity,
-            item.catalog == "simbad",
-            item.subcategory or "",
-        ),
-    )
-    return CombinedClassification(
-        broad_category=chosen.broad_category,
-        subcategory=chosen.subcategory,
-        detail=chosen.detail,
-        conflict=False,
-        specificity=chosen.specificity,
     )

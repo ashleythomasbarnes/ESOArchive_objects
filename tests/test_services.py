@@ -5,10 +5,8 @@ from astropy.table import Table
 from eso_object_types.models import SearchTarget
 from eso_object_types.services import (
     build_eso_query,
-    build_ned_query,
     build_simbad_alias_query,
     build_simbad_query,
-    map_ned_results,
     map_simbad_results,
 )
 
@@ -50,11 +48,6 @@ def test_queries_are_batched_and_constrained() -> None:
     aliases = build_simbad_alias_query()
     assert "TAP_UPLOAD.objects" in aliases
     assert "ident" in aliases
-
-    ned = build_ned_query(targets())
-    assert ned.count("CONTAINS(") == 2
-    assert "\n OR " in ned
-    assert "NEDTAP.objdir" in ned
 
 
 def test_simbad_mapping_expands_consolidated_observations() -> None:
@@ -100,29 +93,8 @@ def test_simbad_mapping_expands_consolidated_observations() -> None:
     assert result.objects[0].spectral_type == "B0 V"
 
 
-def test_ned_mapping_filters_union_to_each_cone() -> None:
-    table = Table(
-        rows=[
-            (200, "Near", 10.0001, -20.0, "G", 3),
-            (201, "Only second", 11.0001, -20.0, "QSO", 4),
-            (202, "Outside", 10.01, -20.0, "G", 3),
-        ],
-        names=("objid", "prefname", "ra", "dec", "prefphytype", "type_key"),
-    )
-    result = map_ned_results(targets(), table)
-    assert {obj.catalog_object_id for obj in result.objects} == {"200", "201"}
-    assert {(match.eso_dp_id, match.catalog_object_id) for match in result.matches} == {
-        ("ESO-A", "200"),
-        ("ESO-B", "200"),
-        ("ESO-C", "201"),
-    }
-    assert all(match.separation_arcsec <= 2.0 for match in result.matches)
-
-
 def test_empty_catalog_results() -> None:
-    result = map_ned_results(targets(), Table())
-    assert result.objects == ()
-    assert result.matches == ()
-    result = map_simbad_results(targets(), None)
-    assert result.objects == ()
-    assert result.matches == ()
+    for table in (None, Table()):
+        result = map_simbad_results(targets(), table)
+        assert result.objects == ()
+        assert result.matches == ()
