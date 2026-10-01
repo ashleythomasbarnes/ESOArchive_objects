@@ -1,11 +1,14 @@
 """Read-only local dashboard. No pipeline or catalogue calls are made here."""
 from __future__ import annotations
 
+import copy
 import csv
 import io
 import json
 import math
 import sqlite3
+from collections import OrderedDict
+from threading import Lock
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,7 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 
 REQUIRED = {
     "pipeline_runs": {"run_id", "started_at", "finished_at", "status", "config_json"},
-    "observations": {"eso_dp_id", "target_name", "instrument_name", "ra_deg", "dec_deg", "search_radius_deg", "access_url"},
+    "observations": {"eso_dp_id", "target_name", "instrument_name", "ra_deg", "dec_deg", "search_radius_deg", "access_url", "healpix_order10"},
     "run_observations": {"run_id", "eso_dp_id"},
     "observation_best_objects": {"run_id", "eso_dp_id", "best_object_name", "broad_category", "subcategory", "classification_detail", "confidence", "match_method", "best_object_key", "separation_arcsec", "alias_complete", "candidate_group_count", "ranking_version", "taxonomy_version"},
     "observation_best_object_members": {"run_id", "eso_dp_id", "catalog", "catalog_object_id", "member_role"},
@@ -43,10 +46,49 @@ def age_seconds(stamp: str | None, now: datetime) -> float | None:
     return max(0, (now - parsed).total_seconds())
 
 
+def compact_moc(cells, order=5):
+    """Merge complete nested HEALPix sibling sets into multi-order cells."""
+    levels = {order: set(cells)}
+    for level in range(order, 0, -1):
+        current = levels[level]
+        parents = {cell >> 2 for cell in current}
+        merged = {parent for parent in parents if all((parent << 2) + i in current for i in range(4))}
+        current.difference_update((parent << 2) + i for parent in merged for i in range(4))
+        levels[level - 1] = merged
+    return {str(level): sorted(cells) for level, cells in sorted(levels.items()) if cells}
+
+
 class DashboardReader:
     def __init__(self, path: str | Path, expected_interval_hours: float | None = None):
         self.path = Path(path).expanduser().resolve()
         self.expected_interval_hours = expected_interval_hours
+        self._cache = OrderedDict()
+        self._cache_lock = Lock()
+
+    def signature(self):
+        # Commits may change the WAL while the database file stays unchanged.
+        result = []
+        for path in (self.path, Path(str(self.path) + "-wal")):
+            try:
+                stat = path.stat()
+                result.append((stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns))
+            except FileNotFoundError:
+                result.append(None)
+        return tuple(result)
+
+    def cached(self, key, compute, signature=None):
+        signature = self.signature() if signature is None else signature
+        with self._cache_lock:
+            if (signature, key) in self._cache and signature == self.signature():
+                self._cache.move_to_end((signature, key))
+                return copy.deepcopy(self._cache[(signature, key)])
+        value = compute()
+        if signature == self.signature():
+            with self._cache_lock:
+                self._cache[(signature, key)] = value
+                while len(self._cache) > 12:
+                    self._cache.popitem(last=False)
+        return copy.deepcopy(value)
 
     @contextmanager
     def connect(self):
@@ -76,6 +118,20 @@ class DashboardReader:
         return dict(row) if row else None
 
     def snapshot(self, run_id: str | None = None, now: datetime | None = None):
+        now = now or datetime.now(UTC)
+        result = self.cached(("snapshot", run_id), lambda: self._snapshot(run_id, now))
+        result["refreshed_at"] = now.isoformat()
+        health = result["health"]
+        latest = health["latest_run"]
+        health["age_seconds"] = age_seconds(latest["finished_at"] or latest["started_at"], now) if latest else None
+        success_age = age_seconds(health["last_success_at"], now)
+        health["overdue"] = self.expected_interval_hours is not None and (success_age is None or success_age > (self.expected_interval_hours + 2) * 3600)
+        for row in result["history"]:
+            if not row["finished_at"]:
+                row["duration_seconds"] = age_seconds(row["started_at"], now)
+        return result
+
+    def _snapshot(self, run_id: str | None = None, now: datetime | None = None):
         now = now or datetime.now(UTC)
         with self.connect() as c:
             latest = self.run(c, None)
@@ -131,24 +187,29 @@ class DashboardReader:
     def results(self, run_id=None, params=None):
         params = params or {}
         page = max(1, int(params.get("page", 1)))
+        size = params.get("page_size", "10")
+        if str(size) not in {"10", "50", "100", "1000", "all"}:
+            raise ValueError("page_size must be 10, 50, 100, 1000 or all")
+        page_size = 1000 if size == "all" else int(size)
+        signature = self.signature()
         with self.connect() as c:
             run = self.run(c, run_id)
             if run is None:
-                return {"run_id": None, "rows": [], "total": 0, "page": 1, "pages": 1}
+                return {"run_id": None, "rows": [], "total": 0, "page": 1, "pages": 1, "page_size": page_size}
             where, values = self.filters(run["run_id"], params)
-            total = c.execute(f"SELECT COUNT(*) {JOIN} WHERE {where}", values).fetchone()[0]
-            pages = max(1, math.ceil(total / 50))
+            total = self.cached(("count", where, tuple(values)), lambda: c.execute(f"SELECT COUNT(*) {JOIN} WHERE {where}", values).fetchone()[0], signature=signature)
+            pages = max(1, math.ceil(total / page_size))
             page = min(page, pages)
-            query = f"SELECT {FIELDS} {JOIN} WHERE {where} ORDER BY o.eso_dp_id"
-            rows = [dict(row) for row in c.execute(query + " LIMIT 50 OFFSET ?", [*values, (page - 1) * 50])]
-            return {"run_id": run["run_id"], "rows": rows, "total": total, "page": page, "pages": pages}
+            query = f"SELECT {FIELDS} {JOIN} WHERE {where} ORDER BY r.eso_dp_id"
+            rows = [dict(row) for row in c.execute(query + " LIMIT ? OFFSET ?", [*values, page_size, (page - 1) * page_size])]
+            return {"run_id": run["run_id"], "rows": rows, "total": total, "page": page, "pages": pages, "page_size": page_size}
 
     def export_csv(self, run_id=None, params=None):
         """Yield bounded CSV chunks instead of retaining the full result in memory."""
         with self.connect() as c:
             run = self.run(c, run_id)
             where, values = self.filters(run["run_id"] if run else None, params or {})
-            cursor = c.execute(f"SELECT {FIELDS} {JOIN} WHERE {where} ORDER BY o.eso_dp_id", values)
+            cursor = c.execute(f"SELECT {FIELDS} {JOIN} WHERE {where} ORDER BY r.eso_dp_id", values)
             stream = io.StringIO(newline="")
             writer = csv.writer(stream)
             writer.writerow(column[0] for column in cursor.description)
@@ -160,11 +221,37 @@ class DashboardReader:
                 yield stream.getvalue().encode("utf-8")
 
     def sky(self, run_id=None, params=None):
+        params = params or {}
+        relevant = tuple((key, params.get(key, "")) for key in ("search", "instrument", "category", "confidence", "sky_mode"))
+        return self.cached(("sky", run_id, relevant), lambda: self._sky(run_id, params))
+
+    def _sky(self, run_id, params):
+        mode = params.get("sky_mode", "auto")
+        if mode not in {"auto", "points", "moc"}:
+            raise ValueError("sky_mode must be auto, points or moc")
+        signature = self.signature()
         with self.connect() as c:
             run = self.run(c, run_id)
             if run is None:
-                return {"run_id": None, "positions": [], "objects": [], "total_positions": 0, "total_objects": 0}
+                return {"run_id": None, "positions": [], "objects": [], "total_positions": 0, "total_objects": 0, "mode": "points", "coverage": []}
             where, values = self.filters(run["run_id"], params or {})
+            count = self.cached(("count", where, tuple(values)), lambda: c.execute(f"SELECT COUNT(*) {JOIN} WHERE {where}", values).fetchone()[0], signature=signature)
+            if mode == "moc" or (mode == "auto" and count > 5000):
+                # Order 5 is bounded to 12,288 cells per category, independent of
+                # spectrum count. These contain centres, not instrument footprints.
+                query = f"""SELECT COALESCE(b.broad_category,'Pending') AS category,
+                    (o.healpix_order10 >> 10) AS cell, COUNT(*) AS count
+                    {JOIN} WHERE {where} AND o.healpix_order10 >= 0 AND o.healpix_order10 < 12582912
+                    GROUP BY category, cell ORDER BY category, cell"""
+                categories = {}
+                for row in c.execute(query, values):
+                    item = categories.setdefault(row["category"], {"cells": [], "count": 0})
+                    item["cells"].append(row["cell"])
+                    item["count"] += row["count"]
+                coverage = [{"category": label, "count": item["count"], "moc": compact_moc(item["cells"])} for label, item in categories.items()]
+                return {"run_id": run["run_id"], "mode": "moc", "coverage": coverage,
+                        "total_spectra": count, "covered_spectra": sum(item["count"] for item in coverage),
+                        "moc_order": 5, "positions": [], "objects": [], "total_positions": None, "total_objects": None}
             grouped = f"""SELECT o.ra_deg,o.dec_deg,MIN(o.eso_dp_id) AS eso_dp_id,COUNT(*) AS count,
                 CASE WHEN COUNT(DISTINCT COALESCE(b.broad_category,'Pending'))=1
                 THEN MIN(COALESCE(b.broad_category,'Pending')) ELSE 'Mixed' END AS category
@@ -177,7 +264,7 @@ class DashboardReader:
                 WHERE {where}"""
             object_total = c.execute(f"SELECT COUNT(*) FROM ({object_query})", values).fetchone()[0]
             objects = [dict(row) for row in c.execute(object_query + " ORDER BY co.catalog,co.catalog_object_id LIMIT 5000", values)]
-            return {"run_id": run["run_id"], "positions": positions, "objects": objects, "total_positions": total, "total_objects": object_total}
+            return {"run_id": run["run_id"], "positions": positions, "objects": objects, "total_positions": total, "total_objects": object_total, "mode": "points", "coverage": [], "total_spectra": count}
 
     def detail(self, run_id, product_id):
         with self.connect() as c:

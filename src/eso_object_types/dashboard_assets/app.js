@@ -6,6 +6,9 @@ const stamp = value => value ? new Date(value).toLocaleString(undefined, {dateSt
 const duration = value => value == null ? '—' : value < 60 ? `${Number(value).toFixed(1)} s` : value < 3600 ? `${Math.floor(value / 60)} m ${Math.floor(value % 60)} s` : value < 86400 ? `${(value / 3600).toFixed(1)} h` : `${(value / 86400).toFixed(1)} d`;
 const colors = {'Star':'#679ddd','Galaxy':'#df9b52','Supernova':'#ab88db','Other transient':'#d382b2','Nebula or ISM':'#68bba9','Star cluster or association':'#8aa4c9','Galaxy group or cluster':'#bca174','Compact object':'#8690de','Solar-system object':'#c1b660','Other':'#75a9ae','Unknown':'#95a1aa','Pending':'#657785','Mixed':'#adc6d0'};
 const color = label => colors[label] || '#6da9b4';
+const confidenceColors = {high:'#3da787',medium:'#dca044',low:'#d57467',none:'#95a1aa',pending:'#679ddd'};
+function chip(label, palette = colors) { const node = el('span',label,'chip');node.style.setProperty('--chip-color',palette[label] || '#95a1aa');return node; }
+const serviceColors = {Completed:'#3da787',Failed:'#d57467',Running:'#dca044','Not recorded':'#95a1aa'};
 let snapshot = null, skyData = null, page = 1, generation = 0, aladin = null, objectCatalog = null, selectedDetail = null, detailGeneration = 0;
 
 async function api(path, params = {}) {
@@ -15,7 +18,7 @@ async function api(path, params = {}) {
   return data;
 }
 function filters(run) {
-  const params = {run:run || snapshot?.selected_run?.run_id || 'latest', page:String(page)};
+  const params = {run:run || snapshot?.selected_run?.run_id || 'latest', page:String(page), page_size:$('page-size').value, sky_mode:$('sky-mode').value};
   for (const id of ['search','instrument','category','confidence']) if ($(id).value) params[id] = $(id).value;
   return params;
 }
@@ -30,16 +33,16 @@ function fillOptions(id, rows, title) {
   $(id).replaceChildren(new Option(title, ''), ...rows.map(row => new Option(`${row.label} (${fmt(row.count)})`, row.label)));
   if ([...$(id).options].some(option => option.value === previous)) $(id).value = previous;
 }
-function bars(id, rows, total, categoryColors = false) {
+function bars(id, rows, total, palette = null) {
   $(id).replaceChildren();
   if (!rows.length) { $(id).append(el('p','No results recorded yet.','muted')); return; }
   const max = Math.max(...rows.map(row => row.count), 1);
   for (const row of rows) {
     const node = el('div',undefined,'bar-row'), label = el('div',undefined,'bar-label');
-    label.append(el('span',row.label), el('span',`${fmt(row.count)} · ${total ? Math.round(row.count / total * 100) : 0}%`,'mono muted'));
+    label.append(palette ? chip(row.label,palette) : el('span',row.label), el('span',`${fmt(row.count)} · ${total ? Math.round(row.count / total * 100) : 0}%`,'mono muted'));
     const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
     svg.setAttribute('viewBox','0 0 100 6'); svg.setAttribute('preserveAspectRatio','none'); svg.classList.add('bar-svg'); svg.setAttribute('aria-hidden','true');
-    const rect = document.createElementNS(svg.namespaceURI,'rect'); rect.setAttribute('width', String(row.count / max * 100)); rect.setAttribute('height','6'); rect.setAttribute('fill',categoryColors ? color(row.label) : 'var(--accent)'); svg.append(rect);
+    const rect = document.createElementNS(svg.namespaceURI,'rect'); rect.setAttribute('width', String(row.count / max * 100)); rect.setAttribute('height','6'); rect.setAttribute('fill',palette ? (palette[row.label] || color(row.label)) : 'var(--accent)'); svg.append(rect);
     node.append(label,svg); $(id).append(node);
   }
 }
@@ -64,14 +67,14 @@ function renderSnapshot(data) {
   for (const [label,value,note] of metricRows) {
     const card = el('div',undefined,'metric'); card.append(el('div',label,'metric-label'),el('div',value == null ? '—' : fmt(value),'metric-value'),el('div',note,'metric-note')); $('metrics').append(card);
   }
-  bars('categories',s?.categories || [],s?.observations,true); bars('confidence-chart',s?.confidence || [],s?.observations); bars('instruments-chart',s?.instruments || [],s?.observations);
+  bars('categories',s?.categories || [],s?.observations,colors); bars('confidence-chart',s?.confidence || [],s?.observations,confidenceColors); bars('instruments-chart',s?.instruments || [],s?.observations);
   fillOptions('instrument',s?.instruments || [],'All instruments'); fillOptions('category',s?.categories || [],'All categories'); fillOptions('confidence',s?.confidence || [],'All confidence levels');
   $('services').replaceChildren();
   for (const [service,label] of [['eso','ESO metadata'],['simbad','SIMBAD positions'],['simbad_alias','SIMBAD aliases']]) {
     const calls = h.calls.filter(row => row.service === service);
     const state = calls.some(row => row.status === 'failed') ? 'Failed' : calls.some(row => row.status === 'running') ? 'Running' : calls.length ? 'Completed' : 'Not recorded';
     const node = el('div',undefined,'service'), top = el('div',undefined,'service-top');
-    top.append(el('strong',label),el('span',state,state === 'Failed' ? 'bad' : state === 'Running' ? 'warning' : calls.length ? 'good' : 'muted'));
+    top.append(el('strong',label),chip(state,serviceColors));
     node.append(top,el('div',`${calls.length} batches · ${calls.reduce((n,row) => n + row.attempt_count,0)} attempts · ${duration(calls.reduce((n,row) => n + (row.elapsed_seconds || 0),0))}`,'service-meta')); $('services').append(node);
   }
   renderHistory(data.history);
@@ -106,12 +109,13 @@ function renderResults(data, params) {
   for (const row of data.rows) {
     const tr = el('tr'), target = el('td'), button = el('button',row.target_name || 'Unnamed target','product-button');
     button.addEventListener('click',() => showDetail(row.eso_dp_id));
-    target.append(button,el('span',row.eso_dp_id,'product-id')); tr.append(target,el('td',row.instrument_name || 'Unknown'),el('td',row.best_object_name || (row.confidence === 'pending' ? 'Pending' : 'No selected object')),el('td',row.broad_category));
-    const confidence = el('td'); confidence.append(el('span',row.confidence,'confidence')); tr.append(confidence,el('td',row.separation_arcsec == null ? '—' : `${Number(row.separation_arcsec).toFixed(2)}″`,'mono')); $('results').append(tr);
+    target.append(button,el('span',row.eso_dp_id,'product-id')); tr.append(target,el('td',row.instrument_name || 'Unknown'),el('td',row.best_object_name || (row.confidence === 'pending' ? 'Pending' : 'No selected object')),el('td'));tr.lastChild.append(chip(row.broad_category));
+    const confidence = el('td'); confidence.append(chip(row.confidence,confidenceColors)); tr.append(confidence,el('td',row.separation_arcsec == null ? '—' : `${Number(row.separation_arcsec).toFixed(2)}″`,'mono')); $('results').append(tr);
   }
   if (!data.rows.length) { const tr = el('tr'), cell = el('td','No spectra match these filters.','empty');cell.colSpan=6;tr.append(cell);$('results').append(tr); }
-  $('result-count').textContent = `${fmt(data.total)} spectra${data.total ? ` · showing ${fmt((page-1)*50+1)}–${fmt(Math.min(page*50,data.total))}` : ''}`;
-  $('page-count').textContent = `${page} / ${data.pages}`; $('previous').disabled=page<=1; $('next').disabled=page>=data.pages;
+  $('result-count').textContent = `${fmt(data.total)} spectra${data.total ? ` · showing ${fmt((page-1)*data.page_size+1)}–${fmt(Math.min(page*data.page_size,data.total))}` : ''}`;
+  $('page-count').textContent = `${fmt(page)} / ${fmt(data.pages)}`; $('next').textContent = $('page-size').value === 'all' ? 'Next batch →' : 'Next →'; $('previous').disabled=page<=1; $('next').disabled=page>=data.pages;
+  if ($('page-size').value === 'all') $('result-count').textContent += ' · bounded batches; export CSV for all rows';
   $('export').href = `/api/export.csv?${new URLSearchParams(params)}`;
 }
 async function refresh() {
@@ -131,6 +135,15 @@ async function refresh() {
     snapshot=data; skyData=sky; renderSnapshot(data); renderResults(results,params); renderSky(); $('alert').hidden=true;
   } catch(error) { if (token === generation) showError(error); }
   finally { if(token===generation) $('refresh').disabled=false; }
+}
+async function refreshResults() {
+  const token = ++generation, params = filters();
+  $('refresh').disabled = true;
+  try {
+    const data = await api('/api/results',params);
+    if(token === generation) { renderResults(data,params); $('alert').hidden=true; }
+  } catch(error) { if(token === generation) showError(error); }
+  finally { if(token === generation) $('refresh').disabled=false; }
 }
 function changeRun() { page=1; selectedDetail=null; ++detailGeneration; $('detail').hidden=true; for (const id of ['search','instrument','category','confidence']) $(id).value=''; refresh(); }
 
@@ -155,11 +168,17 @@ async function showDetail(product) {
 }
 function renderSky() {
   if (!skyData) return;
-  $('sky-count').textContent = `${fmt(skyData.positions.length)} / ${fmt(skyData.total_positions)} positions · ${fmt(skyData.objects.length)} / ${fmt(skyData.total_objects)} objects`;
-  const categories=[...new Set(skyData.positions.map(row=>row.category))];$('map-legend').replaceChildren();
-  for(const category of categories){const item=el('span'),dot=el('i',undefined,'dot');dot.style.background=color(category);item.append(dot,document.createTextNode(category));$('map-legend').append(item);}
+  const coverage = skyData.mode === 'moc';
+  $('object-layer').disabled = coverage;
+  $('sky-count').textContent = coverage ? `Coverage · ${fmt(skyData.covered_spectra)} / ${fmt(skyData.total_spectra)} spectra · order ${skyData.moc_order}` : `${fmt(skyData.positions.length)} / ${fmt(skyData.total_positions)} positions · ${fmt(skyData.objects.length)} / ${fmt(skyData.total_objects)} objects`;
+  const categories = coverage ? skyData.coverage.map(row=>row.category) : [...new Set(skyData.positions.map(row=>row.category))];
+  $('map-legend').replaceChildren(...categories.map(category=>chip(category)));
   if(!aladin) return;
   aladin.removeOverlays();
+  if(coverage) {
+    for(const item of skyData.coverage) aladin.addMOC(A.MOCFromJSON(item.moc,{name:`Spectra · ${item.category}`,color:color(item.category),opacity:0.7,lineWidth:2}));
+    objectCatalog=null;
+  } else {
   for(const category of categories){
     const cat=A.catalog({name:`Spectra · ${category}`,color:color(category),sourceSize:9,shape:'circle',onClick:source=>{if(source?.data?.product) showDetail(source.data.product);}});
     aladin.addCatalog(cat);cat.addSources(skyData.positions.filter(row=>row.category===category).map(row=>A.source(row.ra_deg,row.dec_deg,{product:row.eso_dp_id,count:row.count})));
@@ -167,6 +186,7 @@ function renderSky() {
   objectCatalog=A.catalog({name:'Selected SIMBAD objects',color:'#e4cb80',sourceSize:8,shape:'plus'});aladin.addCatalog(objectCatalog);
   objectCatalog.addSources(skyData.objects.map(row=>A.source(row.ra_deg,row.dec_deg,{name:row.preferred_name || row.catalog_object_id})));
   if(!$('object-layer').checked)objectCatalog.hide();
+  }
   if(selectedDetail){const overlay=A.graphicOverlay({name:'Prototype search region',color:'#f2d77c',lineWidth:2});aladin.addOverlay(overlay);overlay.add(A.circle(selectedDetail.ra_deg,selectedDetail.dec_deg,selectedDetail.search_radius_deg));}
 }
 function skyFailure(message) { $('sky-message').hidden=false;$('sky-message').replaceChildren(el('strong','Sky viewer unavailable'),el('p',message)); }
@@ -179,7 +199,7 @@ async function initSky() {
     });
     let timer;
     try { await Promise.race([A.init,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Aladin initialization timed out. Check WebGL support and reload to retry.')),20000);})]); } finally {clearTimeout(timer);}
-    aladin=A.aladin('#aladin',{survey:'P/DSS2/red',target:'180 0',fov:360,projection:'AIT',cooFrame:'ICRSd',showCooGridControl:true,showShareControl:false,showFullscreenControl:true});
+    aladin=A.aladin('#aladin',{survey:'https://alasky.cds.unistra.fr/MellingerRGB/',target:'266.4051 -28.936175',fov:180,projection:'STG',cooFrame:'ICRSd',showCooGridControl:true,showShareControl:false,showFullscreenControl:true});
     $('sky-message').hidden=true;
     if(selectedDetail){aladin.gotoRaDec(selectedDetail.ra_deg,selectedDetail.dec_deg);aladin.setFoV(Math.max(0.02,selectedDetail.search_radius_deg*8));}
     renderSky();
@@ -190,8 +210,10 @@ $('theme').addEventListener('click',()=>{const current=document.documentElement.
 let searchTimer; $('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{page=1;refresh();},300);});
 for(const id of ['instrument','category','confidence']) $(id).addEventListener('change',()=>{page=1;refresh();});
 $('clear').addEventListener('click',()=>{for(const id of ['search','instrument','category','confidence']) $(id).value='';page=1;refresh();});
-$('previous').addEventListener('click',()=>{page--;refresh();});$('next').addEventListener('click',()=>{page++;refresh();});
+$('previous').addEventListener('click',()=>{page--;refreshResults();});$('next').addEventListener('click',()=>{page++;refreshResults();});
+$('page-size').addEventListener('change',()=>{page=1;refreshResults();});
+$('sky-mode').addEventListener('change',refresh);
 $('object-layer').addEventListener('change',()=>{if(objectCatalog){if($('object-layer').checked)objectCatalog.show();else objectCatalog.hide();}});
-$('reset-sky').addEventListener('click',()=>{if(aladin){aladin.gotoRaDec(180,0);aladin.setFoV(360);}selectedDetail=null;++detailGeneration;$('detail').hidden=true;renderSky();});
+$('reset-sky').addEventListener('click',()=>{if(aladin){aladin.gotoRaDec(266.4051,-28.936175);aladin.setFoV(180);}selectedDetail=null;++detailGeneration;$('detail').hidden=true;renderSky();});
 refresh();initSky();setInterval(()=>{if(!document.hidden)refresh();},30000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});

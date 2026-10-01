@@ -69,6 +69,18 @@ results, filtered CSV downloads, and run/batch diagnostics. Light and dark theme
 are available. Aladin imagery requires internet access and WebGL; the other
 results remain usable if the sky viewer is unavailable.
 
+The table uses SQL filters and pagination, with 10 rows by default. Choose 50,
+100 or 1,000 rows, or browse All in bounded batches of 1,000; CSV exports stream
+all matching rows. Unchanged summaries, counts and sky layers are cached and
+invalidated when the database or WAL changes. Substring searches and deep pages
+can still take longer on large databases.
+
+Aladin uses Mellinger colour imagery in stereographic projection. Auto switches
+from markers to category-coloured MOCs above 5,000 filtered spectra; either view
+can be selected manually. MOCs contain spectrum centres in order-5 HEALPix cells
+(or merged coarser cells), rather than observation footprints. Individual source
+details appear below the viewer; in coverage mode select a source from the table.
+
 The database view refreshes every 30 seconds and follows new manual runs.
 Refreshing the dashboard never runs the pipeline or queries ESO/SIMBAD.
 Historical runs are selectable, while the health strip always reports the latest

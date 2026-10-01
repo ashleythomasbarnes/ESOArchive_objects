@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from eso_object_types.database import SCHEMA
-from eso_object_types.dashboard import DashboardReader, serve_dashboard
+from eso_object_types.dashboard import DashboardReader, compact_moc, serve_dashboard
 
 
 @pytest.fixture
@@ -75,10 +75,10 @@ def test_freshness_manual_and_daily_with_grace(database_path):
 def test_filters_pagination_literal_search_and_csv(database_path):
     reader = DashboardReader(database_path)
     first = reader.results(); second = reader.results(params={'page':'2'})
-    assert first['total'] == 55 and len(first['rows']) == 50
-    assert len(second['rows']) == 5
+    assert first['total'] == 55 and len(first['rows']) == 10
+    assert len(second['rows']) == 10
     assert {r['eso_dp_id'] for r in first['rows']}.isdisjoint(r['eso_dp_id'] for r in second['rows'])
-    assert reader.results(params={'page':'999'})['page'] == 2
+    assert reader.results(params={'page':'999'})['page'] == 6
     assert reader.results(params={'search':'_100%'})['total'] == 1
     assert reader.results(params={'search':"' OR 1=1 --"})['total'] == 0
     params = {'instrument':'SOFI','confidence':'pending'}
@@ -111,7 +111,13 @@ def test_sky_limit_is_explicit(database_path):
         extra = [(f'X-{i}',None,'Extra',i/100,-30,None,None,1/3600,'TEST',None,1,'now') for i in range(5001)]
         c.executemany('INSERT INTO observations VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',extra)
         c.executemany('INSERT INTO run_observations VALUES (?,?)',[('new',row[0]) for row in extra])
-    data = DashboardReader(database_path).sky()
+    reader = DashboardReader(database_path)
+    coverage = reader.sky()
+    assert coverage['mode'] == 'moc'
+    assert coverage['covered_spectra'] == coverage['total_spectra'] == 5056
+    assert not coverage['positions']
+    assert sum(item['count'] for item in coverage['coverage']) == 5056
+    data = reader.sky(params={'sky_mode':'points'})
     assert data['total_positions'] == 5055
     assert len(data['positions']) == 5000
 
@@ -147,3 +153,67 @@ def test_empty_missing_and_incompatible_database(tmp_path):
 @pytest.mark.parametrize('port,interval', [(0,None),(65536,None),(8765,0),(8765,float('nan')),(8765,float('inf'))])
 def test_invalid_server_options_rejected_before_binding(port,interval):
     with pytest.raises(ValueError): serve_dashboard('unused.sqlite',port,interval)
+
+
+@pytest.mark.parametrize('size,expected', [('10',10),('50',50),('100',55),('1000',55),('all',55)])
+def test_page_sizes(database_path, size, expected):
+    data = DashboardReader(database_path).results(params={'page_size':size})
+    assert len(data['rows']) == expected
+    assert data['page_size'] == (1000 if size=='all' else int(size))
+
+
+def test_invalid_sizes_and_modes(database_path):
+    reader = DashboardReader(database_path)
+    with pytest.raises(ValueError,match='page_size'): reader.results(params={'page_size':'2000000'})
+    with pytest.raises(ValueError,match='sky_mode'): reader.sky(params={'sky_mode':'invalid'})
+
+
+def test_moc_merges_siblings_without_inventing_coverage(database_path):
+    assert compact_moc(range(16),2) == {'0':[0]}
+    assert compact_moc([0,1,2,4],2) == {'2':[0,1,2,4]}
+    assert compact_moc([0,1,2,3,4],2) == {'1':[0], '2':[4]}
+    data = DashboardReader(database_path).sky(params={'sky_mode':'moc','category':'Star'})
+    assert data['covered_spectra'] == 1
+    assert data['coverage'] == [{'category':'Star','count':1,'moc':{'5':[0]}}]
+
+
+def test_cache_invalidates_on_wal_commit_and_returns_independent_data(database_path):
+    reader = DashboardReader(database_path)
+    writer = sqlite3.connect(database_path)
+    try:
+        writer.execute('PRAGMA journal_mode=WAL')
+        before = reader.snapshot()
+        before['stats']['observations'] = -1
+        assert reader.snapshot()['stats']['observations'] == 55
+        reader.results(); reader.sky()
+        writer.execute("INSERT INTO observations VALUES ('added',NULL,'Added',20,-20,NULL,NULL,0.001,'NEW',NULL,2048,'now')")
+        writer.execute("INSERT INTO run_observations VALUES ('new','added')")
+        writer.commit()
+        assert reader.snapshot()['stats']['observations'] == 56
+        assert reader.results()['total'] == 56
+        assert reader.sky()['total_positions'] == 55
+    finally:
+        writer.close()
+
+
+def test_all_is_bounded_and_moc_handles_full_sky(database_path):
+    with sqlite3.connect(database_path) as c:
+        rows = [(f'big-{i}',None,'Extra',0,-30,None,None,0.001,'TEST',None,i*1024,'now') for i in range(12288)]
+        c.executemany('INSERT INTO observations VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',rows)
+        c.executemany('INSERT INTO run_observations VALUES (?,?)',[('new',row[0]) for row in rows])
+    reader = DashboardReader(database_path)
+    data = reader.results(params={'page_size':'all'})
+    assert len(data['rows']) == 1000 and data['total'] == 12343
+    sky = reader.sky()
+    pending = next(item for item in sky['coverage'] if item['category']=='Pending')
+    assert pending['moc'] == {'0':list(range(12))}
+    assert sky['covered_spectra'] == 12343
+
+
+def test_results_order_uses_run_membership_index(database_path):
+    from eso_object_types.dashboard import JOIN, FIELDS
+    reader = DashboardReader(database_path)
+    with reader.connect() as c:
+        plan = [row['detail'] for row in c.execute(
+            f'EXPLAIN QUERY PLAN SELECT {FIELDS} {JOIN} WHERE r.run_id=? ORDER BY r.eso_dp_id LIMIT 10', ('new',))]
+    assert not any('TEMP B-TREE FOR ORDER BY' in row for row in plan)
