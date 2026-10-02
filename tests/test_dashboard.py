@@ -217,3 +217,68 @@ def test_results_order_uses_run_membership_index(database_path):
         plan = [row['detail'] for row in c.execute(
             f'EXPLAIN QUERY PLAN SELECT {FIELDS} {JOIN} WHERE r.run_id=? ORDER BY r.eso_dp_id LIMIT 10', ('new',))]
     assert not any('TEMP B-TREE FOR ORDER BY' in row for row in plan)
+
+
+def fix_test_healpix(path):
+    from astropy import units as u
+    from astropy_healpix import HEALPix
+    hpx = HEALPix(nside=1024, order='nested')
+    with sqlite3.connect(path) as c:
+        rows = c.execute('SELECT eso_dp_id,ra_deg,dec_deg FROM observations').fetchall()
+        c.executemany('UPDATE observations SET healpix_order10=? WHERE eso_dp_id=?',
+                      [(int(hpx.lonlat_to_healpix(ra*u.deg,dec*u.deg)),product) for product,ra,dec in rows])
+
+
+def test_adaptive_sky_refines_then_loads_clickable_positions(database_path):
+    fix_test_healpix(database_path)
+    reader = DashboardReader(database_path)
+    assert reader.sky(params={'sky_mode':'moc'})['moc_order'] == 5
+    params = {'sky_mode':'moc','view_ra':'10','view_dec':'-20','view_radius':'20'}
+    finer = reader.sky(params=params)
+    assert finer['moc_order'] == 7 and finer['covered_spectra'] == 55
+    params['view_radius'] = '1'
+    points = reader.sky(params=params)
+    assert points['mode'] == 'points' and points['total_spectra'] == 55
+    assert points['positions'][0]['eso_dp_id'] == 'ESO-000'
+    params['view_ra'] = '180'
+    assert reader.sky(params=params)['positions'] == []
+
+
+@pytest.mark.parametrize('params',[{'view_ra':'10'}, {'view_ra':'NaN','view_dec':'0','view_radius':'1'}, {'view_ra':'0','view_dec':'91','view_radius':'1'}, {'view_ra':'0','view_dec':'0','view_radius':'0'}])
+def test_invalid_viewport(database_path, params):
+    with pytest.raises(ValueError): DashboardReader(database_path).sky(params=params)
+
+
+def test_viewport_handles_ra_wrap_and_pole(database_path):
+    with sqlite3.connect(database_path) as c:
+        c.execute("UPDATE observations SET ra_deg=359.9,dec_deg=0 WHERE eso_dp_id='ESO-000'")
+        c.execute("UPDATE observations SET ra_deg=0.1,dec_deg=0 WHERE eso_dp_id='ESO-001'")
+        c.execute("UPDATE observations SET ra_deg=180,dec_deg=89.99 WHERE eso_dp_id='ESO-002'")
+    fix_test_healpix(database_path)
+    reader = DashboardReader(database_path)
+    wrap = reader.sky(params={'view_ra':'0','view_dec':'0','view_radius':'0.2'})
+    assert {row['eso_dp_id'] for row in wrap['positions']} == {'ESO-000','ESO-001'}
+    pole = reader.sky(params={'view_ra':'0','view_dec':'90','view_radius':'0.1'})
+    assert [row['eso_dp_id'] for row in pole['positions']] == ['ESO-002']
+
+
+def test_dense_viewport_stays_bounded_and_refines_to_order10(database_path):
+    with sqlite3.connect(database_path) as c:
+        rows = [(f'dense-{i}',None,'Extra',10+i*0.00001,-20,None,None,0.001,'TEST',None,1,'now') for i in range(2501)]
+        c.executemany('INSERT INTO observations VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',rows)
+        c.executemany('INSERT INTO run_observations VALUES (?,?)',[('new',row[0]) for row in rows])
+    fix_test_healpix(database_path)
+    reader = DashboardReader(database_path)
+    data = reader.sky(params={'view_ra':'10','view_dec':'-20','view_radius':'1'})
+    assert data['mode'] == 'moc' and data['moc_order'] == 10
+    assert data['covered_spectra'] == 2556 and not data['positions']
+    data = reader.sky(params={'view_ra':'10','view_dec':'-20','view_radius':'0.001'})
+    assert data['mode'] == 'points' and len(data['positions']) < 2000
+
+
+def test_region_query_uses_spatial_index(database_path):
+    from eso_object_types.dashboard import sky_region, JOIN
+    region, values, _ = sky_region({'view_ra':'10','view_dec':'-20','view_radius':'1'})
+    with DashboardReader(database_path).connect() as c:
+        plan = [row['detail'] for row in c.execute(f'EXPLAIN QUERY PLAN SELECT COUNT(*) {JOIN} WHERE r.run_id=? {region}', ['new',*values])]
+    assert any('idx_observations_hpx10' in row for row in plan)

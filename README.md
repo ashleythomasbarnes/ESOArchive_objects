@@ -75,11 +75,16 @@ all matching rows. Unchanged summaries, counts and sky layers are cached and
 invalidated when the database or WAL changes. Substring searches and deep pages
 can still take longer on large databases.
 
-Aladin uses Mellinger colour imagery in stereographic projection. Auto switches
-from markers to category-coloured MOCs above 5,000 filtered spectra; either view
-can be selected manually. MOCs contain spectrum centres in order-5 HEALPix cells
-(or merged coarser cells), rather than observation footprints. Individual source
-details appear below the viewer; in coverage mode select a source from the table.
+Aladin uses Mellinger colour imagery in stereographic projection. The sky view
+queries a padded region around the viewport when you pan or zoom. Coverage uses
+lightly filled, category-coloured HEALPix cells, refining from order 5 to order 10
+as you zoom. Auto and Coverage switch to clickable markers when a narrow region
+contains at most 2,000 distinct positions. Dense regions remain coverage; zoom
+further to reveal sources. Explicit Points mode is capped at 5,000 markers.
+Spatial queries use the existing HEALPix index, and coverage responses are capped
+at 12,000 occupied category cells by reducing resolution when necessary. These
+cells contain spectrum centres, rather than observation footprints. Individual
+source details appear below the viewer.
 
 The database view refreshes every 30 seconds and follows new manual runs.
 Refreshing the dashboard never runs the pipeline or queries ESO/SIMBAD.

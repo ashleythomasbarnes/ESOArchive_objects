@@ -27,10 +27,10 @@
   <div class="main-grid">
     <section class="panel sky-panel" aria-labelledby="sky-title">
       <div class="panel-head"><div><p class="eyebrow">Explore the results</p><h2 id="sky-title">Spectra on the sky</h2></div><button id="reset-sky">Reset sky</button></div>
-      <div class="sky-toolbar"><label>Display<select id="sky-mode"><option value="auto">Auto</option><option value="points">Points (up to 5,000)</option><option value="moc">Coverage (MOC)</option></select></label><label><input id="object-layer" type="checkbox">Selected SIMBAD objects</label><span id="sky-count" class="mono muted"></span></div>
+      <div class="sky-toolbar"><label>Display<select id="sky-mode"><option value="auto">Auto</option><option value="points">Points (up to 5,000)</option><option value="moc">Coverage + zoom detail</option></select></label><label><input id="object-layer" type="checkbox">Selected SIMBAD objects</label><span id="sky-count" class="mono muted"></span></div>
       <div id="sky"><div id="sky-message" class="sky-message"><strong>Loading Aladin Lite</strong><p>Sky imagery requires internet access and WebGL.</p></div><div id="aladin"></div></div>
       <div id="map-legend" class="legend"></div>
-      <p class="footnote">Markers show spectrum centres. Coverage shows occupied HEALPix cells (order 5 or coarser), not instrument footprints. A selected circle shows the prototype search region, not a validated instrument footprint. A catalogue association does not establish a spectral detection.</p>
+      <p class="footnote">Markers show spectrum centres. Coverage cells refine as you zoom (up to order 10), then switch to clickable positions when the visible region is sparse enough. Cells contain spectrum centres, not instrument footprints. A selected circle shows the prototype search region, not a validated instrument footprint. A catalogue association does not establish a spectral detection.</p>
       <div id="detail" class="detail" hidden></div>
     </section>
     <aside class="side-stack">

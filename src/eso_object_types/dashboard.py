@@ -16,6 +16,9 @@ from importlib.resources import files
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from astropy import units as u
+from astropy_healpix import HEALPix
+
 
 REQUIRED = {
     "pipeline_runs": {"run_id", "started_at", "finished_at", "status", "config_json"},
@@ -56,6 +59,40 @@ def compact_moc(cells, order=5):
         current.difference_update((parent << 2) + i for parent in merged for i in range(4))
         levels[level - 1] = merged
     return {str(level): sorted(cells) for level, cells in sorted(levels.items()) if cells}
+
+
+def sky_region(params):
+    """Conservative cone enclosing the viewport, with indexed HEALPix ranges."""
+    keys = ("view_ra", "view_dec", "view_radius")
+    if not any(key in params for key in keys):
+        return "", [], 180.0
+    if not all(key in params for key in keys):
+        raise ValueError("Supply view_ra, view_dec and view_radius together")
+    ra, dec, radius = (float(params[key]) for key in keys)
+    if not all(math.isfinite(v) for v in (ra, dec, radius)) or not -90 <= dec <= 90 or not 0 < radius <= 180:
+        raise ValueError("Invalid sky viewport")
+    ra %= 360
+    if radius >= 90:
+        return "", [], radius
+    clauses = ["o.dec_deg BETWEEN ? AND ?"]
+    values = [max(-90, dec-radius), min(90, dec+radius)]
+    if abs(dec) + radius < 90:
+        span = math.degrees(math.asin(math.sin(math.radians(radius))/math.cos(math.radians(dec))))
+        lo, hi = (ra-span) % 360, (ra+span) % 360
+        clauses.append("(o.ra_deg >= ? OR o.ra_deg <= ?)" if lo > hi else "o.ra_deg BETWEEN ? AND ?")
+        values.extend((lo, hi))
+    # A coarse cone has a small number of ranges, even for a wide viewport.
+    order = min(10, max(0, math.ceil(math.log2(120 / radius))))
+    cells = sorted(int(cell) for cell in HEALPix(nside=2**order, order="nested").cone_search_lonlat(ra*u.deg, dec*u.deg, radius*u.deg))
+    ranges = []
+    for cell in cells:
+        lo, hi = cell << (2*(10-order)), ((cell+1) << (2*(10-order))) - 1
+        if ranges and lo == ranges[-1][1]+1:
+            ranges[-1][1] = hi
+        else:
+            ranges.append([lo, hi])
+    clauses.insert(0, "r.eso_dp_id IN (SELECT eso_dp_id FROM observations WHERE " + " OR ".join("healpix_order10 BETWEEN ? AND ?" for _ in ranges) + ")")
+    return " AND " + " AND ".join(clauses), [v for pair in ranges for v in pair] + values, radius
 
 
 class DashboardReader:
@@ -222,7 +259,7 @@ class DashboardReader:
 
     def sky(self, run_id=None, params=None):
         params = params or {}
-        relevant = tuple((key, params.get(key, "")) for key in ("search", "instrument", "category", "confidence", "sky_mode"))
+        relevant = tuple((key, params.get(key, "")) for key in ("search", "instrument", "category", "confidence", "sky_mode", "view_ra", "view_dec", "view_radius"))
         return self.cached(("sky", run_id, relevant), lambda: self._sky(run_id, params))
 
     def _sky(self, run_id, params):
@@ -235,35 +272,50 @@ class DashboardReader:
             if run is None:
                 return {"run_id": None, "positions": [], "objects": [], "total_positions": 0, "total_objects": 0, "mode": "points", "coverage": []}
             where, values = self.filters(run["run_id"], params or {})
+            region, region_values, radius = sky_region(params)
+            where += region
+            values.extend(region_values)
             count = self.cached(("count", where, tuple(values)), lambda: c.execute(f"SELECT COUNT(*) {JOIN} WHERE {where}", values).fetchone()[0], signature=signature)
-            if mode == "moc" or (mode == "auto" and count > 5000):
-                # Order 5 is bounded to 12,288 cells per category, independent of
-                # spectrum count. These contain centres, not instrument footprints.
-                query = f"""SELECT COALESCE(b.broad_category,'Pending') AS category,
-                    (o.healpix_order10 >> 10) AS cell, COUNT(*) AS count
-                    {JOIN} WHERE {where} AND o.healpix_order10 >= 0 AND o.healpix_order10 < 12582912
-                    GROUP BY category, cell ORDER BY category, cell"""
-                categories = {}
-                for row in c.execute(query, values):
-                    item = categories.setdefault(row["category"], {"cells": [], "count": 0})
-                    item["cells"].append(row["cell"])
-                    item["count"] += row["count"]
-                coverage = [{"category": label, "count": item["count"], "moc": compact_moc(item["cells"])} for label, item in categories.items()]
-                return {"run_id": run["run_id"], "mode": "moc", "coverage": coverage,
-                        "total_spectra": count, "covered_spectra": sum(item["count"] for item in coverage),
-                        "moc_order": 5, "positions": [], "objects": [], "total_positions": None, "total_objects": None}
             grouped = f"""SELECT o.ra_deg,o.dec_deg,MIN(o.eso_dp_id) AS eso_dp_id,COUNT(*) AS count,
                 CASE WHEN COUNT(DISTINCT COALESCE(b.broad_category,'Pending'))=1
                 THEN MIN(COALESCE(b.broad_category,'Pending')) ELSE 'Mixed' END AS category
                 {JOIN} WHERE {where} GROUP BY o.ra_deg,o.dec_deg"""
+            # Fetch at most one extra position to decide whether markers are safe.
+            positions = []
+            if mode == "points" or (mode == "auto" and count <= 2000) or radius <= 15:
+                limit = 5000 if mode == "points" else 2001
+                positions = [dict(row) for row in c.execute(grouped + " ORDER BY o.ra_deg,o.dec_deg LIMIT ?", [*values, limit])]
+            coverage_mode = mode != "points" and (len(positions) > 2000 or (count > 0 and not positions))
+            if coverage_mode:
+                order = min(10, max(5, 5 + int(math.log2(90 / max(radius, 0.01)))))
+                # Reduce resolution if necessary, preserving ALL centres while
+                # keeping the response bounded to 12,000 occupied category cells.
+                while True:
+                    shift = 2 * (10-order)
+                    query = f"""SELECT COALESCE(b.broad_category,'Pending') AS category,
+                        (o.healpix_order10 >> {shift}) AS cell, COUNT(*) AS count
+                        {JOIN} WHERE {where} AND o.healpix_order10 >= 0 AND o.healpix_order10 < 12582912
+                        GROUP BY category, cell ORDER BY category, cell LIMIT 12001"""
+                    cells = c.execute(query, values).fetchall()
+                    if len(cells) <= 12000 or order == 0:
+                        break
+                    order -= 1
+                categories = {}
+                for row in cells:
+                    item = categories.setdefault(row["category"], {"cells": [], "count": 0})
+                    item["cells"].append(row["cell"])
+                    item["count"] += row["count"]
+                coverage = [{"category": label, "count": item["count"], "moc": compact_moc(item["cells"], order)} for label, item in categories.items()]
+                return {"run_id": run["run_id"], "mode": "moc", "coverage": coverage,
+                        "total_spectra": count, "covered_spectra": sum(item["count"] for item in coverage),
+                        "moc_order": order, "positions": [], "objects": [], "total_positions": None, "total_objects": None}
             total = c.execute(f"SELECT COUNT(*) FROM ({grouped})", values).fetchone()[0]
-            positions = [dict(row) for row in c.execute(grouped + " ORDER BY o.ra_deg,o.dec_deg LIMIT 5000", values)]
             object_query = f"""SELECT DISTINCT co.catalog,co.catalog_object_id,co.preferred_name,co.ra_deg,co.dec_deg
                 {JOIN} JOIN observation_best_object_members m ON m.run_id=r.run_id AND m.eso_dp_id=r.eso_dp_id AND m.member_role='primary'
                 JOIN catalog_objects co ON co.catalog=m.catalog AND co.catalog_object_id=m.catalog_object_id
                 WHERE {where}"""
             object_total = c.execute(f"SELECT COUNT(*) FROM ({object_query})", values).fetchone()[0]
-            objects = [dict(row) for row in c.execute(object_query + " ORDER BY co.catalog,co.catalog_object_id LIMIT 5000", values)]
+            objects = [dict(row) for row in c.execute(object_query + " ORDER BY co.catalog,co.catalog_object_id LIMIT 2000", values)]
             return {"run_id": run["run_id"], "positions": positions, "objects": objects, "total_positions": total, "total_objects": object_total, "mode": "points", "coverage": [], "total_spectra": count}
 
     def detail(self, run_id, product_id):

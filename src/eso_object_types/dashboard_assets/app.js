@@ -9,10 +9,10 @@ const color = label => colors[label] || '#6da9b4';
 const confidenceColors = {high:'#3da787',medium:'#dca044',low:'#d57467',none:'#95a1aa',pending:'#679ddd'};
 function chip(label, palette = colors) { const node = el('span',label,'chip');node.style.setProperty('--chip-color',palette[label] || '#95a1aa');return node; }
 const serviceColors = {Completed:'#3da787',Failed:'#d57467',Running:'#dca044','Not recorded':'#95a1aa'};
-let snapshot = null, skyData = null, page = 1, generation = 0, aladin = null, objectCatalog = null, selectedDetail = null, detailGeneration = 0;
+let snapshot = null, skyData = null, page = 1, generation = 0, aladin = null, objectCatalog = null, selectedDetail = null, detailGeneration = 0, skyGeneration = 0, skyTimer = null, skyAbort = null;
 
-async function api(path, params = {}) {
-  const response = await fetch(`${path}?${new URLSearchParams(params)}`, {signal:AbortSignal.timeout(15000)});
+async function api(path, params = {}, signal = AbortSignal.timeout(15000)) {
+  const response = await fetch(`${path}?${new URLSearchParams(params)}`, {signal});
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `Database request failed (${response.status})`);
   return data;
@@ -20,6 +20,12 @@ async function api(path, params = {}) {
 function filters(run) {
   const params = {run:run || snapshot?.selected_run?.run_id || 'latest', page:String(page), page_size:$('page-size').value, sky_mode:$('sky-mode').value};
   for (const id of ['search','instrument','category','confidence']) if ($(id).value) params[id] = $(id).value;
+  if(aladin) {
+    const [ra,dec] = aladin.getRaDec(), fov = aladin.getFov();
+    // A padded circumscribed cone covers the projected rectangle, including its corners.
+    const radius = Math.min(180, Math.hypot(...fov) * 0.6);
+    params.view_ra=ra.toFixed(6);params.view_dec=dec.toFixed(6);params.view_radius=Math.max(radius,0.000001).toFixed(6);
+  }
   return params;
 }
 function showError(error) {
@@ -119,7 +125,7 @@ function renderResults(data, params) {
   $('export').href = `/api/export.csv?${new URLSearchParams(params)}`;
 }
 async function refresh() {
-  const token = ++generation;
+  const token = ++generation, skyToken = ++skyGeneration;skyAbort?.abort();clearTimeout(skyTimer);
   $('refresh').disabled=true;
   try {
     const data = await api('/api/snapshot',{run:$('run').value});
@@ -132,7 +138,7 @@ async function refresh() {
     const params = filters(data.selected_run?.run_id);
     const [results, sky] = data.selected_run ? await Promise.all([api('/api/results',params),api('/api/sky',params)]) : [{rows:[],total:0,page:1,pages:1},{positions:[],objects:[],total_positions:0,total_objects:0}];
     if (token !== generation) return;
-    snapshot=data; skyData=sky; renderSnapshot(data); renderResults(results,params); renderSky(); $('alert').hidden=true;
+    snapshot=data; if(skyToken===skyGeneration) skyData=sky; renderSnapshot(data); renderResults(results,params); renderSky();scheduleSky(); $('alert').hidden=true;
   } catch(error) { if (token === generation) showError(error); }
   finally { if(token===generation) $('refresh').disabled=false; }
 }
@@ -166,17 +172,38 @@ async function showDetail(product) {
     container.scrollIntoView({behavior:'smooth',block:'nearest'});
   }catch(error){showError(error);}
 }
+function scheduleSky() {
+  clearTimeout(skyTimer); ++skyGeneration; skyAbort?.abort();
+  skyTimer=setTimeout(refreshSky,250);
+}
+async function refreshSky() {
+  if(!snapshot?.selected_run || !aladin) return;
+  const token=++skyGeneration, params=filters(), dataGeneration=generation;
+  skyAbort?.abort(); const controller=new AbortController();skyAbort=controller;
+  const timer=setTimeout(()=>controller.abort(),15000);
+  $('sky-count').textContent='Updating visible sky…';
+  try {
+    const data=await api('/api/sky',params,controller.signal);
+    if(token!==skyGeneration || dataGeneration!==generation) return;
+    skyData=data;renderSky();
+  } catch(error) { if(token===skyGeneration && !controller.signal.aborted) $('sky-count').textContent=`Sky update failed: ${error.message}`; }
+  finally { clearTimeout(timer); }
+}
 function renderSky() {
   if (!skyData) return;
   const coverage = skyData.mode === 'moc';
   $('object-layer').disabled = coverage;
-  $('sky-count').textContent = coverage ? `Coverage · ${fmt(skyData.covered_spectra)} / ${fmt(skyData.total_spectra)} spectra · order ${skyData.moc_order}` : `${fmt(skyData.positions.length)} / ${fmt(skyData.total_positions)} positions · ${fmt(skyData.objects.length)} / ${fmt(skyData.total_objects)} objects`;
+  $('sky-count').textContent = coverage ? `Visible-region coverage · ${fmt(skyData.covered_spectra)} spectra · order ${skyData.moc_order} · zoom for points` : `${fmt(skyData.positions.length)} / ${fmt(skyData.total_positions)} positions · ${fmt(skyData.objects.length)} / ${fmt(skyData.total_objects)} objects`;
   const categories = coverage ? skyData.coverage.map(row=>row.category) : [...new Set(skyData.positions.map(row=>row.category))];
   $('map-legend').replaceChildren(...categories.map(category=>chip(category)));
   if(!aladin) return;
-  aladin.removeOverlays();
+  // Remove a snapshot of the layer list; removal mutates Aladin’s collection.
+  for(const overlay of [...aladin.getOverlays()]) aladin.removeOverlay(overlay);
   if(coverage) {
-    for(const item of skyData.coverage) aladin.addMOC(A.MOCFromJSON(item.moc,{name:`Spectra · ${item.category}`,color:color(item.category),opacity:0.7,lineWidth:2}));
+    for(const item of skyData.coverage) {
+      aladin.addMOC(A.MOCFromJSON(item.moc,{name:`Coverage fill · ${item.category}`,fillColor:color(item.category),fill:true,edge:false,opacity:0.14}));
+      aladin.addMOC(A.MOCFromJSON(item.moc,{name:`Coverage edges · ${item.category}`,color:color(item.category),fill:false,edge:true,opacity:0.65,lineWidth:1}));
+    }
     objectCatalog=null;
   } else {
   for(const category of categories){
@@ -200,9 +227,10 @@ async function initSky() {
     let timer;
     try { await Promise.race([A.init,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Aladin initialization timed out. Check WebGL support and reload to retry.')),20000);})]); } finally {clearTimeout(timer);}
     aladin=A.aladin('#aladin',{survey:'https://alasky.cds.unistra.fr/MellingerRGB/',target:'266.4051 -28.936175',fov:180,projection:'STG',cooFrame:'ICRSd',showCooGridControl:true,showShareControl:false,showFullscreenControl:true});
+    aladin.on('zoomChanged',scheduleSky);aladin.on('positionChanged',scheduleSky);
     $('sky-message').hidden=true;
     if(selectedDetail){aladin.gotoRaDec(selectedDetail.ra_deg,selectedDetail.dec_deg);aladin.setFoV(Math.max(0.02,selectedDetail.search_radius_deg*8));}
-    renderSky();
+    renderSky();scheduleSky();
   }catch(error){skyFailure(error.message);}
 }
 $('refresh').addEventListener('click',refresh);$('run').addEventListener('change',changeRun);
