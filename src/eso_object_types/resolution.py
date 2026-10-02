@@ -17,7 +17,7 @@ from .taxonomy import (
 if TYPE_CHECKING:
     from .database import Database
 
-RANKING_VERSION = "v1"
+RANKING_VERSION = "v2"
 
 _GENERIC_NAMES = {
     "",
@@ -133,6 +133,9 @@ def _resolve_observation(
     candidates: list[_Candidate],
 ) -> tuple[BestObject, list[BestObjectMember]]:
     observation_id = str(observation["eso_dp_id"])
+    positional = [item for item in candidates if item.row["match_method"] == "position"]
+    if positional:
+        candidates = positional
     if not candidates:
         return (
             BestObject(
@@ -176,6 +179,9 @@ def _resolve_observation(
             group.name_level = 1
             group.match_method = "target_name_base"
             group.target_variant = base_text
+        if group.candidate.row["match_method"] == "target_name_fallback":
+            group.match_method = "target_name_fallback"
+            group.target_variant = str(target_name)
         group.normalized_separation = (
             group.separation_arcsec / radius_arcsec
             if radius_arcsec > 0
@@ -220,7 +226,7 @@ def _resolve_observation(
         confidence = "low"
 
     classification = classifications[best.object_key]
-    if not alias_complete:
+    if not alias_complete or best.match_method == "target_name_fallback":
         confidence = "low"
 
     representative = best.candidate
@@ -276,7 +282,7 @@ def rebuild_best_objects(database: Database, run_id: str) -> int:
     ).fetchall()
     candidate_rows = connection.execute(
         """
-        SELECT oo.eso_dp_id, oo.separation_arcsec,
+        SELECT oo.eso_dp_id, oo.separation_arcsec, oo.match_method,
                co.catalog, co.catalog_object_id, co.preferred_name,
                co.ra_deg, co.dec_deg, co.primary_type_code,
                co.spectral_type, co.morphological_type,

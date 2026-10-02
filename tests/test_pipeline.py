@@ -310,3 +310,84 @@ def test_partial_alias_stage_is_resumable_and_rebuilds_confidence(tmp_path) -> N
         assert FakeSimbad.alias_calls == 1
     finally:
         database.close()
+
+
+def test_name_fallback_is_low_confidence_and_resumable(tmp_path) -> None:
+    from dataclasses import replace
+
+    class NameEso(FakeEso):
+        def fetch_observations(self, limit, min_radius_arcsec):
+            names = ["Positional star", "SN 2020abc", "sky", "Unresolved object"]
+            return [replace(make_observation(i), target_name=name)
+                    for i, name in enumerate(names)]
+
+    class NameSimbad(FakeSimbad):
+        calls = 0
+        name_calls = 0
+        fail_names = True
+        name_inputs = []
+
+        def query_batch(self, targets):
+            # Only the first observation has a positional match.
+            return super().query_batch([target for target in targets
+                                        if "ESO-0" in target.observation_ids])
+
+        def query_name_batch(self, targets):
+            type(self).name_calls += 1
+            type(self).name_inputs.append([target.target_name for target in targets])
+            if type(self).fail_names:
+                raise TimeoutError("simulated name lookup failure")
+            target = next(t for t in targets if t.target_name == "SN 2020abc")
+            obj = CatalogObject(
+                catalog="simbad", catalog_object_id="123", preferred_name="SN 2020abc",
+                ra_deg=target.ra_deg + 1, dec_deg=target.dec_deg,
+                primary_type_code="SN*", primary_type_label="Supernova",
+                primary_type_description="SuperNova",
+            )
+            return BatchResult((obj,), tuple(
+                ObjectMatch(obs_id, "simbad", "123", 3600, "target_name_fallback")
+                for obs_id in target.observation_ids
+            ))
+
+    database = Database(tmp_path / "names.sqlite")
+    try:
+        pipeline = Pipeline(
+            database, RunConfig(limit=4, retries=1, output_dir=str(tmp_path / "output")),
+            eso_factory=NameEso, simbad_factory=NameSimbad, sleep=lambda _: None,
+        )
+        run_id, code, _ = pipeline.run()
+        assert code == 2
+        assert NameSimbad.calls == 1
+        assert NameSimbad.name_inputs == [["SN 2020abc", "Unresolved object"]]
+        NameSimbad.fail_names = False
+        _, code, _ = pipeline.run(resume_run=run_id)
+        assert code == 0
+        assert NameSimbad.calls == 1
+        assert NameSimbad.name_calls == 2
+        rows = {row["eso_dp_id"]: row for row in database.connection.execute(
+            "SELECT * FROM observation_best_objects WHERE run_id = ?", (run_id,)
+        )}
+        assert rows["ESO-0"]["match_method"] == "position"
+        assert rows["ESO-0"]["confidence"] == "medium"
+        assert rows["ESO-1"]["match_method"] == "target_name_fallback"
+        assert rows["ESO-1"]["confidence"] == "low"
+        assert rows["ESO-1"]["broad_category"] == "Supernova"
+        assert rows["ESO-1"]["separation_arcsec"] == 3600
+        assert rows["ESO-1"]["target_name_variant"] == "SN 2020abc"
+        assert rows["ESO-1"]["alias_complete"] == 1
+        assert rows["ESO-2"]["confidence"] == "none"
+        assert rows["ESO-3"]["confidence"] == "none"
+        with (tmp_path / "output" / run_id / "observation_best_objects.csv").open(
+            newline="", encoding="utf-8"
+        ) as stream:
+            exported = {row["eso_dp_id"]: row for row in csv.DictReader(stream)}
+        assert exported["ESO-1"]["confidence"] == "low"
+        assert exported["ESO-1"]["match_method"] == "target_name_fallback"
+        _, code, _ = pipeline.run(resume_run=run_id)
+        assert code == 0
+        assert NameSimbad.name_calls == 2  # Also caches the name with no result.
+        assert database.connection.execute(
+            "SELECT count(*) FROM observation_objects"
+        ).fetchone()[0] == 2
+    finally:
+        database.close()

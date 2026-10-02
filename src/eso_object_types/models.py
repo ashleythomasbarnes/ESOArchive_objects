@@ -60,6 +60,7 @@ class SearchTarget:
     dec_deg: float
     radius_deg: float
     observation_ids: tuple[str, ...]
+    target_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,7 @@ class ObjectMatch:
     catalog: str
     catalog_object_id: str
     separation_arcsec: float
+    match_method: str = "position"
 
 
 @dataclass(frozen=True)

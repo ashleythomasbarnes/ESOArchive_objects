@@ -102,8 +102,18 @@ class EsoClient:
         return observations
 
 
-def build_simbad_query() -> str:
-    return """
+def build_simbad_query(*, by_name: bool = False) -> str:
+    join = """
+        JOIN ident AS i ON i.oidref = b.oid
+        JOIN TAP_UPLOAD.targets AS u ON i.id = u.target_name
+    """ if by_name else """
+        JOIN TAP_UPLOAD.targets AS u
+          ON 1 = CONTAINS(
+              POINT('ICRS', b.ra, b.dec),
+              CIRCLE('ICRS', u.ra_deg, u.dec_deg, u.radius_deg)
+          )
+    """
+    return f"""
         SELECT
             u.search_key,
             b.oid,
@@ -122,11 +132,7 @@ def build_simbad_query() -> str:
                 POINT('ICRS', u.ra_deg, u.dec_deg)
             ) * 3600.0 AS separation_arcsec
         FROM basic AS b
-        JOIN TAP_UPLOAD.targets AS u
-          ON 1 = CONTAINS(
-              POINT('ICRS', b.ra, b.dec),
-              CIRCLE('ICRS', u.ra_deg, u.dec_deg, u.radius_deg)
-          )
+        {join}
         LEFT OUTER JOIN otypedef AS d
           ON b.otype = d.otype
     """
@@ -202,6 +208,22 @@ class SimbadClient:
             for object_id, alias in sorted(aliases)
         )
 
+    def query_name_batch(self, targets: Sequence[SearchTarget]) -> BatchResult:
+        upload = Table(
+            rows=[
+                (target.search_key, target.target_name, target.ra_deg, target.dec_deg)
+                for target in targets
+            ],
+            names=("search_key", "target_name", "ra_deg", "dec_deg"),
+        )
+        table = self.client.query_tap(
+            build_simbad_query(by_name=True),
+            maxrec=self.client.hardlimit,
+            async_job=len(targets) > 1_000,
+            targets=upload,
+        )
+        return map_simbad_results(targets, table, match_method="target_name_fallback")
+
 
 def build_simbad_alias_query() -> str:
     return """
@@ -213,7 +235,8 @@ def build_simbad_alias_query() -> str:
 
 
 def map_simbad_results(
-    targets: Sequence[SearchTarget], table: Table | None
+    targets: Sequence[SearchTarget], table: Table | None,
+    *, match_method: str = "position",
 ) -> BatchResult:
     by_key = {target.search_key: target for target in targets}
     objects: dict[str, CatalogObject] = {}
@@ -255,6 +278,7 @@ def map_simbad_results(
                 catalog="simbad",
                 catalog_object_id=object_id,
                 separation_arcsec=separation,
+                match_method=match_method,
             )
     return BatchResult(tuple(objects.values()), tuple(matches.values()))
 

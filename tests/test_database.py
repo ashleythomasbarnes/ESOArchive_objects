@@ -134,3 +134,30 @@ def test_incompatible_database_is_rejected_before_writing(tmp_path) -> None:
         Database(path)
 
     assert path.read_bytes() == original
+
+
+def test_existing_positional_links_gain_provenance_on_upgrade(tmp_path) -> None:
+    path = tmp_path / "upgrade.sqlite"
+    database = Database(path)
+    database.create_run("run-1", RunConfig())
+    database.save_observations("run-1", [sample_observation()])
+    database.connection.execute(
+        "INSERT INTO catalog_objects(catalog, catalog_object_id, ra_deg, dec_deg, updated_at) "
+        "VALUES ('simbad', '1', 10, -20, 'now')"
+    )
+    database.connection.execute(
+        "INSERT INTO observation_objects(eso_dp_id, catalog, catalog_object_id, "
+        "separation_arcsec, first_seen_run_id, last_seen_run_id, updated_at) "
+        "VALUES ('ESO-1', 'simbad', '1', 0.5, 'run-1', 'run-1', 'now')"
+    )
+    database.connection.execute("ALTER TABLE observation_objects DROP COLUMN match_method")
+    database.connection.commit()
+    database.close()
+    upgraded = Database(path)
+    try:
+        link = upgraded.connection.execute("SELECT * FROM observation_objects").fetchone()
+        assert link["match_method"] == "position"
+        assert link["separation_arcsec"] == 0.5
+        assert link["catalog_object_id"] == "1"
+    finally:
+        upgraded.close()

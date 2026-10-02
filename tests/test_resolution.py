@@ -305,7 +305,7 @@ def test_name_match_beats_nearer_unrelated_object(tmp_path) -> None:
         row = best_row(database)
         assert row["best_object_name"] == "LSQ 12dyw"
         assert row["broad_category"] == "Supernova"
-        assert row["subcategory"] == "Unknown subtype"
+        assert row["subcategory"] == "Supernova"
         assert row["confidence"] == "high"
         assert row["candidate_group_count"] == 2
     finally:
@@ -559,6 +559,30 @@ def test_schema_v1_database_is_migrated_in_place(tmp_path) -> None:
             "morphological_type",
             "aliases_retrieved_at",
         } <= object_columns
-        assert database.connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert database.connection.execute("PRAGMA user_version").fetchone()[0] == 3
+    finally:
+        database.close()
+
+
+def test_positional_candidate_wins_over_name_only_candidate(tmp_path) -> None:
+    database = Database(tmp_path / "priority.sqlite")
+    try:
+        database.create_run("run-1", RunConfig())
+        database.save_observations("run-1", [observation("Named star")])
+        positional = CatalogObject("simbad", "1", "Nearby star", 10, -20, "*", "Star", "Star")
+        named = CatalogObject("simbad", "2", "Named star", 11, -20, "SN*", "Supernova", "SuperNova")
+        save_catalog(database, "simbad", [positional], [0.25])
+        database.start_service_call("run-1", "simbad_name", "names", 1, 1)
+        database.complete_catalog_call(
+            "run-1", "simbad_name", "names", 0.1,
+            BatchResult((named,), (ObjectMatch("ESO-1", "simbad", "2", 3600, "target_name_fallback"),)),
+            ["ESO-1"],
+        )
+        save_aliases(database, ["1", "2"], [])
+        selected = best_row(database)
+        assert selected["best_object_name"] == "Nearby star"
+        assert selected["match_method"] == "position"
+        assert selected["confidence"] == "medium"
+        assert database.connection.execute("SELECT count(*) FROM observation_objects").fetchone()[0] == 2
     finally:
         database.close()

@@ -45,6 +45,12 @@ def test_queries_are_batched_and_constrained() -> None:
     assert "d.path" in simbad
     assert "d.is_candidate" in simbad
 
+    names = build_simbad_query(by_name=True)
+    assert "i.id = u.target_name" in names
+    assert "i.oidref = b.oid" in names
+    assert "CONTAINS" not in names
+    assert "separation_arcsec" in names
+
     aliases = build_simbad_alias_query()
     assert "TAP_UPLOAD.objects" in aliases
     assert "ident" in aliases
@@ -91,6 +97,10 @@ def test_simbad_mapping_expands_consolidated_observations() -> None:
     assert result.objects[0].catalog_object_id == "100"
     assert result.objects[0].primary_type_path == "* > Star"
     assert result.objects[0].spectral_type == "B0 V"
+    fallback = map_simbad_results(
+        targets(), table, match_method="target_name_fallback"
+    )
+    assert all(match.match_method == "target_name_fallback" for match in fallback.matches)
 
 
 def test_empty_catalog_results() -> None:
@@ -98,3 +108,25 @@ def test_empty_catalog_results() -> None:
         result = map_simbad_results(targets(), table)
         assert result.objects == ()
         assert result.matches == ()
+
+
+def test_name_lookup_uploads_literal_identifiers() -> None:
+    from types import SimpleNamespace
+    from eso_object_types.services import SimbadClient
+
+    calls = []
+
+    def query_tap(query, **kwargs):
+        calls.append((query, kwargs))
+        return None
+
+    client = SimbadClient.__new__(SimbadClient)
+    client.client = SimpleNamespace(hardlimit=200000, query_tap=query_tap)
+    result = client.query_name_batch([
+        SearchTarget("name-1", 10.0, -20.0, 1 / 3600, ("ESO-A",), "A' name_%")
+    ])
+    assert result.objects == ()
+    query, kwargs = calls[0]
+    assert "A' name_%" not in query
+    assert kwargs["targets"]["target_name"][0] == "A' name_%"
+    assert kwargs["targets"]["ra_deg"][0] == 10.0

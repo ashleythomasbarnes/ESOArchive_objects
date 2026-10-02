@@ -97,6 +97,7 @@ def batch_hash(service: str, targets: Sequence[SearchTarget]) -> str:
                 "dec": round(target.dec_deg, 12),
                 "radius": round(target.radius_deg, 12),
                 "observations": target.observation_ids,
+                **({"target_name": target.target_name} if target.target_name else {}),
             }
             for target in targets
         ],
