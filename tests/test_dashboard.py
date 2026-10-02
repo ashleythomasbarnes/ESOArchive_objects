@@ -28,7 +28,7 @@ def database_path(tmp_path):
             match_method,candidate_group_count,alias_complete,ranking_version,taxonomy_version,updated_at
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''', ('new', f'ESO-{i:03}', key, 'Selected star' if key else None, 'Star' if key else 'Unknown', 'high' if key else 'none', 'position', 1 if key else 0, 1, '1','1','now'))
     c.execute("INSERT INTO catalog_objects (catalog,catalog_object_id,preferred_name,ra_deg,dec_deg,updated_at) VALUES ('simbad','1','Selected star',10,-20,'now')")
-    c.execute("INSERT INTO observation_objects VALUES ('ESO-000','simbad','1',0.1,'new','new','now')")
+    c.execute("INSERT INTO observation_objects VALUES ('ESO-000','simbad','1',0.1,'position','new','new','now')")
     c.execute("INSERT INTO observation_best_object_members VALUES ('new','ESO-000','simbad','1','primary')")
     c.execute('''INSERT INTO service_calls (run_id,service,batch_hash,batch_number,input_count,attempt_count,status,started_at,finished_at,elapsed_seconds,error_type,error_message)
         VALUES ('new','simbad','batch',1,55,3,'failed','2026-10-01T10:00:01+00:00','2026-10-01T10:00:09+00:00',8,'TimeoutError','Service timed out')''')

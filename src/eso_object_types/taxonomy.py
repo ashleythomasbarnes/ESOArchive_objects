@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-TAXONOMY_VERSION = "v1"
+TAXONOMY_VERSION = "v2"
 
 BROAD_CATEGORIES = (
     "Star",
@@ -114,7 +114,7 @@ def classify_catalog_object(row: Any) -> TypeAssertion:
     subtype: str | None = None
     detail: str | None = None
     if category == "Supernova":
-        subtype = "Candidate supernova" if is_candidate else "Unknown subtype"
+        subtype = "Candidate supernova" if is_candidate else category
     elif category == "Star":
         subtype = _specific_description(
             description, {"a star", "star", "stellar object"}
@@ -140,6 +140,9 @@ def classify_catalog_object(row: Any) -> TypeAssertion:
         subtype = description or label or code
     elif category == "Other":
         subtype = description or label or code
+
+    if subtype is None and category not in {"Unknown", "Other"}:
+        subtype = category
 
     specificity = 0
     if category not in {"Unknown", "Other"}:

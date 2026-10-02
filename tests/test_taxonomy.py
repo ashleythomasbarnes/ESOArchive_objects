@@ -50,7 +50,7 @@ def test_specific_galaxy_type_and_morphology() -> None:
     assert simbad.detail == "SBb"
 
 
-def test_supernova_candidate_and_missing_subtype_are_explicit() -> None:
+def test_supernova_candidate_and_main_class_subcategory() -> None:
     candidate = classify_catalog_object(
         row(
             primary_type_code="SN?",
@@ -71,7 +71,20 @@ def test_supernova_candidate_and_missing_subtype_are_explicit() -> None:
     )
     assert candidate.broad_category == "Supernova"
     assert candidate.subcategory == "Candidate supernova"
-    assert confirmed.subcategory == "Unknown subtype"
+    assert confirmed.subcategory == "Supernova"
+
+
+def test_generic_types_use_the_main_class_without_extra_specificity() -> None:
+    for code, category in [("*", "Star"), ("G", "Galaxy"), ("SN*", "Supernova")]:
+        assertion = classify_catalog_object(
+            row(primary_type_code=code, type_label=category, type_description=category)
+        )
+        assert assertion.subcategory == category
+        assert assertion.specificity == 1
+
+    unknown = classify_catalog_object(row(primary_type_code="?"))
+    assert unknown.broad_category == "Unknown"
+    assert unknown.subcategory is None
 
 
 def test_explicit_codes_cover_the_remaining_broad_categories() -> None:

@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS observation_objects (
     catalog TEXT NOT NULL,
     catalog_object_id TEXT NOT NULL,
     separation_arcsec REAL NOT NULL,
+    match_method TEXT NOT NULL DEFAULT 'position',
     first_seen_run_id TEXT NOT NULL REFERENCES pipeline_runs(run_id),
     last_seen_run_id TEXT NOT NULL REFERENCES pipeline_runs(run_id),
     updated_at TEXT NOT NULL,
@@ -209,6 +210,9 @@ class Database:
 
     def _migrate_schema(self) -> None:
         migrations = {
+            "observation_objects": {
+                "match_method": "TEXT NOT NULL DEFAULT 'position'",
+            },
             "object_types": {
                 "type_path": "TEXT",
                 "type_is_candidate": "INTEGER",
@@ -226,7 +230,7 @@ class Database:
                     self.connection.execute(
                         f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
                     )
-        self.connection.execute("PRAGMA user_version = 2")
+        self.connection.execute("PRAGMA user_version = 3")
 
     def close(self) -> None:
         self.connection.close()
@@ -456,8 +460,10 @@ class Database:
                     f"""
                     DELETE FROM observation_objects
                     WHERE catalog = ? AND eso_dp_id IN ({placeholders})
+                      AND (? = 'simbad' OR match_method = 'target_name_fallback')
                     """,
-                    (service, *observation_ids),
+                    ("simbad" if service == "simbad_name" else service,
+                     *observation_ids, service),
                 )
 
             for obj in result.objects:
@@ -523,10 +529,11 @@ class Database:
                     """
                     INSERT INTO observation_objects(
                         eso_dp_id, catalog, catalog_object_id, separation_arcsec,
-                        first_seen_run_id, last_seen_run_id, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        match_method, first_seen_run_id, last_seen_run_id, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(eso_dp_id, catalog, catalog_object_id) DO UPDATE SET
                         separation_arcsec = excluded.separation_arcsec,
+                        match_method = excluded.match_method,
                         last_seen_run_id = excluded.last_seen_run_id,
                         updated_at = excluded.updated_at
                     """,
@@ -535,6 +542,7 @@ class Database:
                         match.catalog,
                         match.catalog_object_id,
                         match.separation_arcsec,
+                        match.match_method,
                         run_id,
                         run_id,
                         now,

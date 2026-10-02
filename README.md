@@ -185,8 +185,10 @@ Each SIMBAD object is a separate candidate, ranked by:
 
 The selected object receives a broad category such as `Star`, `Galaxy`, or
 `Supernova`, followed by a more descriptive subcategory when SIMBAD
-provides one. Stellar spectral type and galaxy morphology are retained as
-details. A supernova subtype is reported only when it is actually available.
+provides one. When no finer subcategory is available, the subcategory repeats
+the broad category (for example, `Supernova` for SIMBAD `SN*`). Stellar spectral
+type and galaxy morphology are retained as details. Candidate supernovae
+remain labelled `Candidate supernova`.
 The complete broad list is `Star`, `Galaxy`, `Supernova`, `Other transient`,
 `Nebula or ISM`, `Star cluster or association`, `Galaxy group or cluster`,
 `Compact object`, `Solar-system object`, `Other`, and `Unknown`.
@@ -194,6 +196,14 @@ The complete broad list is `Star`, `Galaxy`, `Supernova`, `Other transient`,
 Every selected result includes `high`, `medium`, `low`, or `none` confidence.
 A low-confidence row is still the highest-ranked candidate; a row with no
 catalog candidate is reported as `Unknown` with `none` confidence.
+
+After successful positional searches, observations with no SIMBAD candidate
+receive one final lookup of the original ESO target name against SIMBAD
+identifiers. Blank and generic names such as `sky` are skipped. These matches
+are labelled `target_name_fallback` and always receive `low` confidence,
+including when the named object lies outside the positional search region.
+Their actual angular separation is retained. Name lookups are batched and
+cached for resume, and never replace positional candidates.
 
 This stage uses the ESO and SIMBAD table results. It does not fetch FITS
 headers or make a separate SSA query.
