@@ -15,7 +15,7 @@ from .resolution import rebuild_best_objects
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="eso-object-types",
-        description="Enrich ESO reduced spectra with SIMBAD and NED object types.",
+        description="Enrich ESO reduced spectra with SIMBAD object types.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -24,7 +24,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--min-radius-arcsec", type=float, default=1.0)
     run.add_argument("--simbad-batch-size", type=int, default=50_000)
     run.add_argument("--simbad-alias-batch-size", type=int, default=10_000)
-    run.add_argument("--ned-batch-size", type=int, default=50)
     run.add_argument("--retries", type=int, default=5)
     run.add_argument("--database", default="output/eso_object_types.sqlite")
     run.add_argument("--output-dir", default="output")
@@ -36,9 +35,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--simbad-endpoint",
         default="https://simbad.cds.unistra.fr/simbad/sim-tap",
     )
-    run.add_argument(
-        "--ned-endpoint", default="https://ned.ipac.caltech.edu/tap"
-    )
 
     report = subparsers.add_parser(
         "report", help="Re-export CSV files for an existing run"
@@ -46,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--database", default="output/eso_object_types.sqlite")
     report.add_argument("--run-id")
     report.add_argument("--output-dir", default="output")
+    dashboard = subparsers.add_parser(
+        "dashboard", help="Serve the read-only local spectrum monitor"
+    )
+    dashboard.add_argument("--database", default="output/eso_object_types.sqlite")
+    dashboard.add_argument("--port", type=int, default=8765)
+    dashboard.add_argument("--expected-interval-hours", type=float)
     return parser
 
 
@@ -55,11 +57,9 @@ def run_command(args: argparse.Namespace) -> int:
         min_radius_arcsec=args.min_radius_arcsec,
         simbad_batch_size=args.simbad_batch_size,
         simbad_alias_batch_size=args.simbad_alias_batch_size,
-        ned_batch_size=args.ned_batch_size,
         retries=args.retries,
         eso_endpoint=args.eso_endpoint,
         simbad_endpoint=args.simbad_endpoint,
-        ned_endpoint=args.ned_endpoint,
         output_dir=args.output_dir,
     )
     database = Database(args.database)
@@ -90,7 +90,6 @@ def report_command(args: argparse.Namespace) -> int:
             run_id,
             args.output_dir,
             config.simbad_batch_size,
-            config.ned_batch_size,
         )
         print(f"exports: {path}")
         print(json.dumps(summary, indent=2, sort_keys=True))
@@ -107,6 +106,12 @@ def main(argv: list[str] | None = None) -> int:
             return run_command(args)
         if args.command == "report":
             return report_command(args)
+        if args.command == "dashboard":
+            from .dashboard import serve_dashboard
+
+            return serve_dashboard(
+                args.database, args.port, args.expected_interval_hours
+            )
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

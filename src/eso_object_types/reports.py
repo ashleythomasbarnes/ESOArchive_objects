@@ -27,7 +27,6 @@ def build_summary(
     connection: sqlite3.Connection,
     run_id: str,
     simbad_batch_size: int,
-    ned_batch_size: int,
 ) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
     metrics["observations"] = connection.execute(
@@ -86,28 +85,6 @@ def build_summary(
         """
         SELECT COUNT(*) FROM observation_best_objects
         WHERE run_id = ? AND best_object_key IS NOT NULL
-        """,
-        (run_id,),
-    ).fetchone()[0]
-    metrics["best_object_cross_catalog"] = connection.execute(
-        """
-        SELECT COUNT(*) FROM observation_best_objects
-        WHERE run_id = ? AND supporting_catalogs = 'ned,simbad'
-        """,
-        (run_id,),
-    ).fetchone()[0]
-    metrics["best_object_cross_catalog_agreement"] = connection.execute(
-        """
-        SELECT COUNT(*) FROM observation_best_objects
-        WHERE run_id = ? AND supporting_catalogs = 'ned,simbad'
-          AND classification_conflict = 0
-        """,
-        (run_id,),
-    ).fetchone()[0]
-    metrics["best_object_classification_conflicts"] = connection.execute(
-        """
-        SELECT COUNT(*) FROM observation_best_objects
-        WHERE run_id = ? AND classification_conflict = 1
         """,
         (run_id,),
     ).fetchone()[0]
@@ -219,10 +196,6 @@ def build_summary(
     metrics["scale.projected_simbad_batches_for_2m"] = math.ceil(
         projected_unique / simbad_batch_size
     )
-    metrics["scale.projected_ned_batches_for_2m"] = math.ceil(
-        projected_unique / ned_batch_size
-    )
-    metrics["scale.ned_public_tap_bulk_ready"] = "no"
     return metrics
 
 
@@ -231,7 +204,6 @@ def export_run(
     run_id: str,
     output_dir: str | Path,
     simbad_batch_size: int,
-    ned_batch_size: int,
 ) -> tuple[Path, dict[str, Any]]:
     destination = Path(output_dir) / run_id
     destination.mkdir(parents=True, exist_ok=True)
@@ -305,9 +277,7 @@ def export_run(
     for filename, query in exports.items():
         _write_query_csv(connection, destination / filename, query, (run_id,))
 
-    summary = build_summary(
-        connection, run_id, simbad_batch_size, ned_batch_size
-    )
+    summary = build_summary(connection, run_id, simbad_batch_size)
     with (destination / "run_summary.csv").open(
         "w", newline="", encoding="utf-8"
     ) as stream:

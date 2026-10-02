@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='5' fill='%23147b8c'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='monospace' font-size='24' fill='white'%3EE%3C/text%3E%3C/svg%3E">
+  <meta name="color-scheme" content="light dark"><title>ESO Spectrum Monitor</title>
+  <script>try{const t=localStorage.getItem('eso-monitor-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+  <link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to results</a>
+<header class="header"><div class="shell header-inner">
+  <div><p class="eyebrow">Archive object enrichment</p><h1>ESO <span>Spectrum Monitor</span></h1></div>
+  <div class="header-controls"><label>Results run<select id="run"><option value="latest">Latest run · follows updates</option></select></label><button id="refresh">↻ Refresh</button><button id="theme" aria-label="Switch colour theme">◐ Theme</button></div>
+</div></header>
+<main id="main" class="shell">
+  <div id="alert" role="alert" hidden></div>
+  <section class="health-bar" aria-label="Latest system health">
+    <div class="health-title"><span id="health-dot" class="dot neutral"></span><strong id="health-status">Connecting to database</strong><span id="mode" class="badge">Manual testing</span></div>
+    <div id="health-meta" class="mono">Reading recorded run status…</div>
+    <div id="last-success" class="muted"></div>
+    <div id="services" class="service-list" aria-label="Latest run service outcomes"></div>
+    <p class="service-note muted">Latest run recorded calls · outcomes reflect the last run, not live service availability.</p>
+  </section>
+  <div class="scope-line"><span id="scope">Latest run results</span><span id="totals" class="mono"></span></div>
+  <section id="metrics" class="metrics" aria-label="Run summary"></section>
+  <div class="main-grid">
+    <section class="panel sky-panel" aria-labelledby="sky-title">
+      <div class="panel-head"><div><p class="eyebrow">Explore the results</p><h2 id="sky-title">Spectra on the sky</h2></div><button id="reset-sky">Reset sky</button></div>
+      <div class="sky-toolbar"><label>Display<select id="sky-mode"><option value="auto">Auto</option><option value="points">Points (up to 5,000)</option><option value="moc">Coverage + zoom detail</option></select></label><label><input id="object-layer" type="checkbox">Selected SIMBAD objects</label><span id="sky-count" class="mono muted"></span></div>
+      <div id="sky"><div id="sky-message" class="sky-message"><strong>Loading Aladin Lite</strong><p>Sky imagery requires internet access and WebGL.</p></div><div id="aladin"></div></div>
+      <div id="map-legend" class="legend"></div>
+      <p class="footnote">Markers show spectrum centres. Coverage cells refine as you zoom (up to order 10), then switch to clickable positions when the visible region is sparse enough. Cells contain spectrum centres, not instrument footprints. A selected circle shows the prototype search region, not a validated instrument footprint. A catalogue association does not establish a spectral detection.</p>
+      <div id="detail" class="detail" hidden></div>
+    </section>
+    <aside class="side-stack">
+
+      <section class="panel"><div class="panel-head"><div><p class="eyebrow">Selected run · all spectra</p><h2>Object classifications</h2></div></div><div id="categories" class="bars"></div></section>
+    </aside>
+  </div>
+  <section class="charts-grid" aria-label="Result statistics">
+    <div class="panel"><div class="panel-head"><div><p class="eyebrow">Selected run · all spectra</p><h2>Match confidence</h2></div></div><div id="confidence-chart" class="bars"></div></div>
+    <div class="panel"><div class="panel-head"><div><p class="eyebrow">Selected run · all spectra</p><h2>Instruments</h2></div></div><div id="instruments-chart" class="bars"></div></div>
+    <div class="panel"><div class="panel-head"><div><p class="eyebrow">Last 8 runs · duration / spectra</p><h2>Run history</h2></div></div><div id="history-chart"></div></div>
+  </section>
+  <section class="panel results-panel" aria-labelledby="results-title">
+    <div class="panel-head"><div><p class="eyebrow">Catalogue associations</p><h2 id="results-title">Spectrum results</h2></div><a id="export" class="button" href="/api/export.csv">↓ Export filtered CSV</a></div>
+    <div class="filters"><label class="search-label">Search targets, objects or product IDs<input id="search" type="search" placeholder="e.g. LSQ, Supernova target, ADP…"></label><label>Instrument<select id="instrument"><option value="">All instruments</option></select></label><label>Category<select id="category"><option value="">All categories</option></select></label><label>Confidence<select id="confidence"><option value="">All confidence levels</option></select></label><button id="clear">Clear</button></div>
+    <div class="table-wrap"><table><thead><tr><th>ESO target / product</th><th>Instrument</th><th>Selected object</th><th>Category</th><th>Confidence</th><th>Separation</th></tr></thead><tbody id="results"></tbody></table></div>
+    <div class="pagination"><label>Rows per page<select id="page-size"><option value="10">10</option><option value="50">50</option><option value="100">100</option><option value="1000">1,000</option><option value="all">All (1,000 per batch)</option></select></label><span id="result-count" class="mono muted"></span><div><button id="previous">← Previous</button><span id="page-count" class="mono"></span><button id="next">Next →</button></div></div>
+  </section>
+  <section class="diagnostics"><details><summary>Run history and batch diagnostics <span class="muted">Timings, retries, errors and configuration</span></summary><div class="panel diagnostic-content"><h3>Latest run batches</h3><div class="table-wrap"><table><thead><tr><th>Stage / batch</th><th>Status</th><th>Attempts</th><th>Inputs</th><th>Results</th><th>Duration</th><th>Error</th></tr></thead><tbody id="batches"></tbody></table></div><h3>Available history</h3><div id="history-list"></div><h3>Selected run configuration</h3><pre id="config"></pre><p class="footnote">Best classifications are stored per run. Raw catalogue objects, positions and candidate links reflect current stored metadata.</p></div></details></section>
+  <footer><span id="updated">Waiting for first refresh</span><span>Metadata only · read-only database view · refreshes every 30 s</span></footer>
+</main>
+</body></html>

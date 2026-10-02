@@ -15,8 +15,8 @@ from .geometry import batch_hash, chunked, consolidate_search_targets
 from .logging_utils import EventLogger
 from .models import BatchResult, Observation, RunConfig, SearchTarget
 from .reports import build_summary, export_run
-from .resolution import rebuild_best_objects
-from .services import EsoClient, NedClient, SimbadClient
+from .resolution import rebuild_best_objects, target_name_variants
+from .services import EsoClient, SimbadClient
 
 
 def new_run_id() -> str:
@@ -60,7 +60,6 @@ class Pipeline:
         config: RunConfig,
         eso_factory: Callable[[str], Any] = EsoClient,
         simbad_factory: Callable[[str], Any] = SimbadClient,
-        ned_factory: Callable[[str], Any] = NedClient,
         sleep: Callable[[float], None] = time.sleep,
         random_source: Callable[[], float] = random.random,
     ):
@@ -68,7 +67,6 @@ class Pipeline:
         self.config = config
         self.eso_factory = eso_factory
         self.simbad_factory = simbad_factory
-        self.ned_factory = ned_factory
         self.sleep = sleep
         self.random_source = random_source
 
@@ -180,6 +178,7 @@ class Pipeline:
         batch_size: int,
         client_factory: Callable[[str], Any],
         endpoint: str,
+        query_method: str = "query_batch",
     ) -> bool:
         successful = True
         client: Any | None = None
@@ -215,7 +214,7 @@ class Pipeline:
                     logger=logger,
                     service=service,
                     call_hash=call_hash,
-                    operation=lambda current=batch: client.query_batch(current),
+                    operation=lambda current=batch: getattr(client, query_method)(current),
                 )
                 elapsed = time.monotonic() - started
                 observation_ids = sorted(
@@ -265,6 +264,53 @@ class Pipeline:
                     error_type=type(error).__name__,
                 )
         return successful
+
+    def _process_simbad_names(
+        self, run_id: str, logger: EventLogger, observations: Sequence[Observation]
+    ) -> bool:
+        positional_ids = {
+            str(row[0])
+            for row in self.database.connection.execute(
+                """
+                SELECT DISTINCT oo.eso_dp_id FROM observation_objects AS oo
+                JOIN run_observations AS ro USING (eso_dp_id)
+                WHERE ro.run_id = ? AND oo.catalog = 'simbad'
+                  AND oo.match_method = 'position'
+                """,
+                (run_id,),
+            )
+        }
+        grouped: dict[tuple[str, float, float, float], list[str]] = {}
+        for observation in observations:
+            if observation.eso_dp_id in positional_ids:
+                continue
+            original, _ = target_name_variants(observation.target_name)
+            if not original:
+                continue
+            key = (
+                observation.target_name.strip(), observation.ra_deg,
+                observation.dec_deg, observation.search_radius_deg,
+            )
+            grouped.setdefault(key, []).append(observation.eso_dp_id)
+        targets = [
+            SearchTarget(
+                search_key=hashlib.sha256(json.dumps(key).encode()).hexdigest()[:32],
+                target_name=key[0], ra_deg=key[1], dec_deg=key[2], radius_deg=key[3],
+                observation_ids=tuple(sorted(grouped[key])),
+            )
+            for key in sorted(grouped)
+        ]
+        logger.info(
+            "name_fallback_start",
+            f"Checking {len(targets)} unmatched ESO target names in SIMBAD",
+            service="simbad_name", input_count=len(targets),
+        )
+        return self._process_catalog(
+            run_id=run_id, logger=logger, service="simbad_name", targets=targets,
+            batch_size=self.config.simbad_batch_size,
+            client_factory=self.simbad_factory, endpoint=self.config.simbad_endpoint,
+            query_method="query_name_batch",
+        )
 
     def _process_simbad_aliases(
         self, run_id: str, logger: EventLogger
@@ -408,16 +454,11 @@ class Pipeline:
                     client_factory=self.simbad_factory,
                     endpoint=self.config.simbad_endpoint,
                 )
-                ned_success = self._process_catalog(
-                    run_id=run_id,
-                    logger=logger,
-                    service="ned",
-                    targets=targets,
-                    batch_size=self.config.ned_batch_size,
-                    client_factory=self.ned_factory,
-                    endpoint=self.config.ned_endpoint,
-                )
-                catalogs_success = simbad_success and ned_success
+                catalogs_success = simbad_success
+                if simbad_success:
+                    catalogs_success = self._process_simbad_names(
+                        run_id, logger, observations
+                    )
                 aliases_success = self._process_simbad_aliases(run_id, logger)
                 resolved_count = rebuild_best_objects(self.database, run_id)
                 logger.info(
@@ -435,7 +476,6 @@ class Pipeline:
                 self.database.connection,
                 run_id,
                 self.config.simbad_batch_size,
-                self.config.ned_batch_size,
             )
             self.database.finish_run(run_id, status, summary)
             export_path, summary = export_run(
@@ -443,7 +483,6 @@ class Pipeline:
                 run_id,
                 self.config.output_dir,
                 self.config.simbad_batch_size,
-                self.config.ned_batch_size,
             )
             logger.info(
                 "run_finish",

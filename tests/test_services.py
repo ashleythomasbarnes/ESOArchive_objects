@@ -5,10 +5,8 @@ from astropy.table import Table
 from eso_object_types.models import SearchTarget
 from eso_object_types.services import (
     build_eso_query,
-    build_ned_query,
     build_simbad_alias_query,
     build_simbad_query,
-    map_ned_results,
     map_simbad_results,
 )
 
@@ -47,14 +45,15 @@ def test_queries_are_batched_and_constrained() -> None:
     assert "d.path" in simbad
     assert "d.is_candidate" in simbad
 
+    names = build_simbad_query(by_name=True)
+    assert "i.id = u.target_name" in names
+    assert "i.oidref = b.oid" in names
+    assert "CONTAINS" not in names
+    assert "separation_arcsec" in names
+
     aliases = build_simbad_alias_query()
     assert "TAP_UPLOAD.objects" in aliases
     assert "ident" in aliases
-
-    ned = build_ned_query(targets())
-    assert ned.count("CONTAINS(") == 2
-    assert "\n OR " in ned
-    assert "NEDTAP.objdir" in ned
 
 
 def test_simbad_mapping_expands_consolidated_observations() -> None:
@@ -98,31 +97,36 @@ def test_simbad_mapping_expands_consolidated_observations() -> None:
     assert result.objects[0].catalog_object_id == "100"
     assert result.objects[0].primary_type_path == "* > Star"
     assert result.objects[0].spectral_type == "B0 V"
-
-
-def test_ned_mapping_filters_union_to_each_cone() -> None:
-    table = Table(
-        rows=[
-            (200, "Near", 10.0001, -20.0, "G", 3),
-            (201, "Only second", 11.0001, -20.0, "QSO", 4),
-            (202, "Outside", 10.01, -20.0, "G", 3),
-        ],
-        names=("objid", "prefname", "ra", "dec", "prefphytype", "type_key"),
+    fallback = map_simbad_results(
+        targets(), table, match_method="target_name_fallback"
     )
-    result = map_ned_results(targets(), table)
-    assert {obj.catalog_object_id for obj in result.objects} == {"200", "201"}
-    assert {(match.eso_dp_id, match.catalog_object_id) for match in result.matches} == {
-        ("ESO-A", "200"),
-        ("ESO-B", "200"),
-        ("ESO-C", "201"),
-    }
-    assert all(match.separation_arcsec <= 2.0 for match in result.matches)
+    assert all(match.match_method == "target_name_fallback" for match in fallback.matches)
 
 
 def test_empty_catalog_results() -> None:
-    result = map_ned_results(targets(), Table())
+    for table in (None, Table()):
+        result = map_simbad_results(targets(), table)
+        assert result.objects == ()
+        assert result.matches == ()
+
+
+def test_name_lookup_uploads_literal_identifiers() -> None:
+    from types import SimpleNamespace
+    from eso_object_types.services import SimbadClient
+
+    calls = []
+
+    def query_tap(query, **kwargs):
+        calls.append((query, kwargs))
+        return None
+
+    client = SimbadClient.__new__(SimbadClient)
+    client.client = SimpleNamespace(hardlimit=200000, query_tap=query_tap)
+    result = client.query_name_batch([
+        SearchTarget("name-1", 10.0, -20.0, 1 / 3600, ("ESO-A",), "A' name_%")
+    ])
     assert result.objects == ()
-    assert result.matches == ()
-    result = map_simbad_results(targets(), None)
-    assert result.objects == ()
-    assert result.matches == ()
+    query, kwargs = calls[0]
+    assert "A' name_%" not in query
+    assert kwargs["targets"]["target_name"][0] == "A' name_%"
+    assert kwargs["targets"]["ra_deg"][0] == 10.0

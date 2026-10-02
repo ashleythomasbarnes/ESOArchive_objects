@@ -5,23 +5,19 @@ import math
 import re
 import unicodedata
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-
-import astropy.units as u
-from astropy.coordinates import SkyCoord
 
 from .models import BestObject, BestObjectMember
 from .taxonomy import (
     TAXONOMY_VERSION,
     classify_catalog_object,
-    combine_classifications,
 )
 
 if TYPE_CHECKING:
     from .database import Database
 
-RANKING_VERSION = "v1"
+RANKING_VERSION = "v2"
 
 _GENERIC_NAMES = {
     "",
@@ -111,8 +107,8 @@ class _Candidate:
 
 
 @dataclass
-class _CandidateGroup:
-    members: list[_Candidate] = field(default_factory=list)
+class _RankedCandidate:
+    candidate: _Candidate
     name_level: int = 0
     match_method: str = "position"
     target_variant: str | None = None
@@ -121,106 +117,13 @@ class _CandidateGroup:
 
     @property
     def separation_arcsec(self) -> float:
-        return min(member.separation_arcsec for member in self.members)
-
-    @property
-    def catalogs(self) -> set[str]:
-        return {member.catalog for member in self.members}
+        return self.candidate.separation_arcsec
 
     @property
     def object_key(self) -> str:
-        identities = sorted(
-            f"{member.catalog}:{member.object_id}" for member in self.members
-        )
-        digest = hashlib.sha256("|".join(identities).encode("utf-8")).hexdigest()
+        identity = f"{self.candidate.catalog}:{self.candidate.object_id}"
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         return f"resolved-{digest[:16]}"
-
-
-def _catalog_separation(first: _Candidate, second: _Candidate) -> float:
-    first_position = SkyCoord(
-        float(first.row["ra_deg"]) * u.deg,
-        float(first.row["dec_deg"]) * u.deg,
-    )
-    second_position = SkyCoord(
-        float(second.row["ra_deg"]) * u.deg,
-        float(second.row["dec_deg"]) * u.deg,
-    )
-    return float(first_position.separation(second_position).arcsec)
-
-
-def _group_candidates(candidates: list[_Candidate]) -> list[_CandidateGroup]:
-    simbad = [item for item in candidates if item.catalog == "simbad"]
-    ned = [item for item in candidates if item.catalog == "ned"]
-    groups = {
-        item.object_id: _CandidateGroup(members=[item]) for item in simbad
-    }
-    simbad_by_name: dict[str, list[_Candidate]] = defaultdict(list)
-    for simbad_item in simbad:
-        for name in simbad_item.names:
-            simbad_by_name[name].append(simbad_item)
-
-    possible_pairs: list[tuple[float, str, str]] = []
-    ambiguous_ned: set[str] = set()
-    for ned_item in ned:
-        preferred_name = normalize_name(ned_item.preferred_name)
-        matches = simbad_by_name.get(preferred_name, []) if preferred_name else []
-        if not matches:
-            continue
-        distances = sorted(
-            (_catalog_separation(ned_item, item), item.object_id)
-            for item in matches
-        )
-        if len(distances) > 1 and math.isclose(
-            distances[0][0], distances[1][0], abs_tol=1e-6
-        ):
-            ambiguous_ned.add(ned_item.object_id)
-            continue
-        possible_pairs.append(
-            (distances[0][0], ned_item.object_id, distances[0][1])
-        )
-
-    ned_by_id = {item.object_id: item for item in ned}
-    used_ned: set[str] = set()
-    used_simbad: set[str] = set()
-    for _, ned_id, simbad_id in sorted(possible_pairs):
-        if (
-            ned_id in used_ned
-            or simbad_id in used_simbad
-            or ned_id in ambiguous_ned
-        ):
-            continue
-        groups[simbad_id].members.append(ned_by_id[ned_id])
-        used_ned.add(ned_id)
-        used_simbad.add(simbad_id)
-
-    result = list(groups.values())
-    result.extend(
-        _CandidateGroup(members=[item])
-        for item in ned
-        if item.object_id not in used_ned
-    )
-    return result
-
-
-def _representative(group: _CandidateGroup) -> _Candidate:
-    return min(
-        group.members,
-        key=lambda member: (
-            member.catalog != "simbad",
-            member.separation_arcsec,
-            member.preferred_name or "",
-            member.object_id,
-        ),
-    )
-
-
-def _raw_types(group: _CandidateGroup) -> str:
-    return ";".join(
-        f"{member.catalog}:{member.row['primary_type_code'] or 'UNKNOWN'}"
-        for member in sorted(
-            group.members, key=lambda item: (item.catalog, item.object_id)
-        )
-    )
 
 
 def _resolve_observation(
@@ -230,6 +133,9 @@ def _resolve_observation(
     candidates: list[_Candidate],
 ) -> tuple[BestObject, list[BestObjectMember]]:
     observation_id = str(observation["eso_dp_id"])
+    positional = [item for item in candidates if item.row["match_method"] == "position"]
+    if positional:
+        candidates = positional
     if not candidates:
         return (
             BestObject(
@@ -249,7 +155,6 @@ def _resolve_observation(
                 runner_up_margin=None,
                 supporting_catalogs=None,
                 raw_catalog_types=None,
-                classification_conflict=False,
                 alias_complete=True,
                 ranking_version=RANKING_VERSION,
                 taxonomy_version=TAXONOMY_VERSION,
@@ -261,11 +166,11 @@ def _resolve_observation(
     original_name, base_name = target_name_variants(target_name)
     base_text = _base_target_text(target_name)
     radius_arcsec = float(observation["search_radius_deg"]) * 3600.0
-    groups = _group_candidates(candidates)
+    groups = [_RankedCandidate(candidate=item) for item in candidates]
 
     classifications: dict[str, Any] = {}
     for group in groups:
-        all_names = set().union(*(member.names for member in group.members))
+        all_names = group.candidate.names
         if original_name and original_name in all_names:
             group.name_level = 2
             group.match_method = "target_name"
@@ -274,14 +179,15 @@ def _resolve_observation(
             group.name_level = 1
             group.match_method = "target_name_base"
             group.target_variant = base_text
+        if group.candidate.row["match_method"] == "target_name_fallback":
+            group.match_method = "target_name_fallback"
+            group.target_variant = str(target_name)
         group.normalized_separation = (
             group.separation_arcsec / radius_arcsec
             if radius_arcsec > 0
             else math.inf
         )
-        classification = combine_classifications(
-            [classify_catalog_object(member.row) for member in group.members]
-        )
+        classification = classify_catalog_object(group.candidate.row)
         classifications[group.object_key] = classification
         group.classification_specificity = classification.specificity
 
@@ -289,7 +195,6 @@ def _resolve_observation(
         key=lambda group: (
             -group.name_level,
             group.normalized_separation,
-            -len(group.catalogs),
             -group.classification_specificity,
             group.object_key,
         )
@@ -302,10 +207,7 @@ def _resolve_observation(
         else second.normalized_separation - best.normalized_separation
     )
 
-    alias_complete = all(
-        member.catalog != "simbad" or bool(member.row["aliases_complete"])
-        for member in candidates
-    )
+    alias_complete = all(bool(item.row["aliases_complete"]) for item in candidates)
     same_name_level = sum(
         group.name_level == best.name_level and group.name_level > 0
         for group in groups
@@ -324,24 +226,18 @@ def _resolve_observation(
         confidence = "low"
 
     classification = classifications[best.object_key]
-    if not alias_complete or classification.conflict:
+    if not alias_complete or best.match_method == "target_name_fallback":
         confidence = "low"
 
-    representative = _representative(best)
+    representative = best.candidate
     members = [
         BestObjectMember(
             run_id=run_id,
             eso_dp_id=observation_id,
-            catalog=member.catalog,
-            catalog_object_id=member.object_id,
-            member_role=(
-                "primary"
-                if member.catalog == representative.catalog
-                and member.object_id == representative.object_id
-                else "supporting"
-            ),
+            catalog=representative.catalog,
+            catalog_object_id=representative.object_id,
+            member_role="primary",
         )
-        for member in best.members
     ]
     return (
         BestObject(
@@ -359,9 +255,11 @@ def _resolve_observation(
             normalized_separation=best.normalized_separation,
             candidate_group_count=len(groups),
             runner_up_margin=runner_up_margin,
-            supporting_catalogs=",".join(sorted(best.catalogs)),
-            raw_catalog_types=_raw_types(best),
-            classification_conflict=classification.conflict,
+            supporting_catalogs=representative.catalog,
+            raw_catalog_types=(
+                f"{representative.catalog}:"
+                f"{representative.row['primary_type_code'] or 'UNKNOWN'}"
+            ),
             alias_complete=alias_complete,
             ranking_version=RANKING_VERSION,
             taxonomy_version=TAXONOMY_VERSION,
@@ -384,10 +282,10 @@ def rebuild_best_objects(database: Database, run_id: str) -> int:
     ).fetchall()
     candidate_rows = connection.execute(
         """
-        SELECT oo.eso_dp_id, oo.separation_arcsec,
+        SELECT oo.eso_dp_id, oo.separation_arcsec, oo.match_method,
                co.catalog, co.catalog_object_id, co.preferred_name,
                co.ra_deg, co.dec_deg, co.primary_type_code,
-               co.catalog_type_key, co.spectral_type, co.morphological_type,
+               co.spectral_type, co.morphological_type,
                CASE
                    WHEN co.aliases_retrieved_at IS NOT NULL
                      OR EXISTS (

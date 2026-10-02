@@ -10,11 +10,9 @@ class RunConfig:
     min_radius_arcsec: float = 1.0
     simbad_batch_size: int = 50_000
     simbad_alias_batch_size: int = 10_000
-    ned_batch_size: int = 50
     retries: int = 5
     eso_endpoint: str = "https://archive.eso.org/tap_obs"
     simbad_endpoint: str = "https://simbad.cds.unistra.fr/simbad/sim-tap"
-    ned_endpoint: str = "https://ned.ipac.caltech.edu/tap"
     output_dir: str = "output"
 
     def to_dict(self) -> dict[str, Any]:
@@ -36,8 +34,6 @@ class RunConfig:
             raise ValueError(
                 "simbad_alias_batch_size must be between 1 and 200000"
             )
-        if self.ned_batch_size < 1:
-            raise ValueError("ned_batch_size must be at least 1")
         if self.retries < 1:
             raise ValueError("retries must be at least 1")
 
@@ -64,6 +60,7 @@ class SearchTarget:
     dec_deg: float
     radius_deg: float
     observation_ids: tuple[str, ...]
+    target_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,7 +73,6 @@ class CatalogObject:
     primary_type_code: str | None
     primary_type_label: str | None
     primary_type_description: str | None
-    catalog_type_key: str | None = None
     primary_type_path: str | None = None
     primary_type_is_candidate: bool | None = None
     spectral_type: str | None = None
@@ -89,6 +85,7 @@ class ObjectMatch:
     catalog: str
     catalog_object_id: str
     separation_arcsec: float
+    match_method: str = "position"
 
 
 @dataclass(frozen=True)
@@ -122,7 +119,6 @@ class BestObject:
     runner_up_margin: float | None
     supporting_catalogs: str | None
     raw_catalog_types: str | None
-    classification_conflict: bool
     alias_complete: bool
     ranking_version: str
     taxonomy_version: str
