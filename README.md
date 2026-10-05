@@ -33,6 +33,13 @@ eso-object-types run
 
 The command prints a `run_id` and a summary. The main outputs are:
 
+Progress messages show elapsed time for the current invocation. SIMBAD batch
+updates also show the percentage processed, stage elapsed time, estimated time
+remaining, and estimated stage finish in your local timezone. Estimates start
+after the first new batch and include retry delays; cached batches on resume
+do not contribute to the estimated batch time. Each stage is estimated separately
+because later stages depend on the query results.
+
 ```text
 output/
 ├── eso_object_types.sqlite
