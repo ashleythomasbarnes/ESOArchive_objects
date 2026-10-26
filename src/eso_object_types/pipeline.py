@@ -12,7 +12,7 @@ from typing import Any
 
 from .database import Database
 from .geometry import batch_hash, chunked, consolidate_search_targets
-from .logging_utils import EventLogger
+from .logging_utils import BatchProgress, EventLogger
 from .models import BatchResult, Observation, RunConfig, SearchTarget
 from .reports import build_summary, export_run
 from .resolution import rebuild_best_objects, target_name_variants
@@ -183,15 +183,23 @@ class Pipeline:
         successful = True
         client: Any | None = None
         batches = list(chunked(targets, batch_size))
+        cached_batches = {
+            number for number, batch in enumerate(batches, start=1)
+            if self.database.service_call_status(run_id, service, batch_hash(service, batch))
+            == "completed"
+        }
+        progress = BatchProgress(len(batches), len(cached_batches))
+        logger.info(
+            "stage_start",
+            f"{service}: {len(batches)} batches ({len(cached_batches)} cached) | {progress.suffix()}",
+            service=service,
+        )
         for batch_number, batch in enumerate(batches, start=1):
             call_hash = batch_hash(service, batch)
-            if (
-                self.database.service_call_status(run_id, service, call_hash)
-                == "completed"
-            ):
+            if batch_number in cached_batches:
                 logger.info(
                     "batch_skip",
-                    f"{service} batch {batch_number}/{len(batches)} already completed",
+                    f"{service} batch {batch_number}/{len(batches)} already completed | {progress.suffix()}",
                     service=service,
                     batch_hash=call_hash,
                     batch_number=batch_number,
@@ -237,6 +245,7 @@ class Pipeline:
                     (
                         f"{service} batch {batch_number}/{len(batches)}: "
                         f"{len(result.objects)} objects, {len(result.matches)} links"
+                        f" | {progress.suffix(advance=True)}"
                     ),
                     service=service,
                     batch_hash=call_hash,
@@ -257,6 +266,7 @@ class Pipeline:
                     (
                         f"{service} batch {batch_number}/{len(batches)} failed: "
                         f"{type(error).__name__}: {str(error)[:300]}"
+                        f" | {progress.suffix(advance=True)}"
                     ),
                     service=service,
                     batch_hash=call_hash,
@@ -332,22 +342,30 @@ class Pipeline:
         ]
         client: Any | None = None
         successful = True
+        call_hashes = [
+            hashlib.sha256(b"simbad_alias|" + "|".join(batch).encode("utf-8")).hexdigest()
+            for batch in batches
+        ]
+        cached_batches = {
+            number for number, call_hash in enumerate(call_hashes, start=1)
+            if self.database.service_call_status(run_id, "simbad_alias", call_hash)
+            == "completed"
+        }
+        progress = BatchProgress(len(batches), len(cached_batches))
+        logger.info(
+            "stage_start",
+            f"SIMBAD aliases: {len(batches)} batches ({len(cached_batches)} cached) | {progress.suffix()}",
+            service="simbad_alias",
+        )
         for batch_number, batch in enumerate(batches, start=1):
-            encoded = "|".join(batch).encode("utf-8")
-            call_hash = hashlib.sha256(
-                b"simbad_alias|" + encoded
-            ).hexdigest()
-            if (
-                self.database.service_call_status(
-                    run_id, "simbad_alias", call_hash
-                )
-                == "completed"
-            ):
+            call_hash = call_hashes[batch_number - 1]
+            if batch_number in cached_batches:
                 logger.info(
                     "batch_skip",
                     (
                         f"SIMBAD alias batch {batch_number}/{len(batches)} "
                         "already completed"
+                        f" | {progress.suffix()}"
                     ),
                     service="simbad_alias",
                     batch_hash=call_hash,
@@ -382,6 +400,7 @@ class Pipeline:
                     (
                         f"SIMBAD alias batch {batch_number}/{len(batches)}: "
                         f"{len(aliases)} aliases"
+                        f" | {progress.suffix(advance=True)}"
                     ),
                     service="simbad_alias",
                     batch_hash=call_hash,
@@ -401,6 +420,7 @@ class Pipeline:
                     (
                         f"SIMBAD alias batch {batch_number}/{len(batches)} "
                         f"failed: {type(error).__name__}: {str(error)[:300]}"
+                        f" | {progress.suffix(advance=True)}"
                     ),
                     service="simbad_alias",
                     batch_hash=call_hash,

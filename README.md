@@ -8,6 +8,27 @@ object-to-spectrum links in SQLite and CSV files.
 The workflow uses metadata only. It does not download the spectral FITS files
 and does not establish that a catalogued object was detected in a spectrum.
 
+## Handoff and first large trial
+
+For the planned two-million-spectrum proof of concept, start with the
+[launch and recovery guide](docs/first_2m_run.md). It includes exact commands,
+read-only diagnostics, known scaling limits and the latest verified local
+inventory. Developers and coding agents should read [AGENTS.md](AGENTS.md);
+[CLAUDE.md](CLAUDE.md) points Claude to the same instructions.
+
+There are two separate workflows in this checkout:
+
+| Workflow | Input | Output |
+| --- | --- | --- |
+| `eso-object-types run` | Live ESO ObsCore metadata, using `--limit` | SIMBAD enrichment database, CSVs and logs. |
+| `input/prepare_target_database.py` | Local target-keyword CSV | Independent database of raw fields and derived FK5/J2000 target coordinates. |
+
+**The enrichment CLI does not yet read the prepared target database.**
+`--database` specifies the enrichment output, not an input catalogue.
+`--limit 2000000` requests that many ObsCore rows; it does not select from
+`input/`. See [input/README.md](input/README.md) for the standalone coordinate
+workflow and the decisions needed before integrating it.
+
 ## Quick start
 
 From the repository root, create an environment and install the package:
@@ -31,7 +52,18 @@ Run the default 50-spectrum test:
 eso-object-types run
 ```
 
+Use a fresh database for a new large trial, as shown in the run guide. If using
+the local virtual environment without activation, invoke commands as
+`.venv/bin/python -m eso_object_types ...`.
+
 The command prints a `run_id` and a summary. The main outputs are:
+
+Progress messages show elapsed time for the current invocation. SIMBAD batch
+updates also show the percentage processed, stage elapsed time, estimated time
+remaining, and estimated stage finish in your local timezone. Estimates start
+after the first new batch and include retry delays; cached batches on resume
+do not contribute to the estimated batch time. Each stage is estimated separately
+because later stages depend on the query results.
 
 ```text
 output/
@@ -135,12 +167,13 @@ region, instrument, and access URL. It does not retrieve the data products.
 For each spectrum, the prototype defines a circular search radius:
 
 ```text
-max(s_fov / 2, --min-radius-arcsec)
+radius_deg = max(s_fov / 2, min_radius_arcsec / 3600)
 ```
 
 If `s_fov` is missing or invalid, the minimum radius is used. Observations with
-identical right ascension, declination, and radius are consolidated into one
-search position before either catalog is queried. Any matches are linked back
+identical right ascension, declination, and radius (formatted to 12 decimal
+places for the consolidation key) are consolidated into one search position
+before SIMBAD is queried. Any matches are linked back
 to every ESO product at that position.
 
 ### 2. Search SIMBAD
@@ -286,11 +319,18 @@ services or batches failed, exits with status `2`. Copy the printed `run_id`
 and resume only the unfinished work:
 
 ```bash
-eso-object-types run --resume-run <run_id>
+eso-object-types run --resume-run 'RUN_ID'
 ```
 
-The stored configuration is authoritative when resuming. Other run options
+Replace `RUN_ID` with the recorded identifier. The stored configuration is
+authoritative when resuming. Other run options
 supplied on the resume command do not replace it.
+For a custom database, always include `--database /path/to/enrichment.sqlite`.
+The saved configuration includes `output_dir`; use the original launch directory
+if its paths are relative. A crash or interruption can leave the status
+`running`, and completed batches can still be reused. See the
+[recovery guide](docs/first_2m_run.md#diagnose-and-recover) before changing batch
+sizes or retrying a large run.
 
 ### Recreate reports
 
@@ -299,6 +339,12 @@ Export the CSV files again for the latest database run:
 ```bash
 eso-object-types report
 ```
+
+This command rebuilds stored best-object results before exporting, so it writes
+to the database. It makes no ESO/SIMBAD queries. Stop the pipeline writer before
+using it for recovery. Run status is saved before CSV export; if export fails,
+the database can already say `completed`. Check the files and `run_finish` log
+event as well as the status.
 
 Report options are:
 
@@ -440,7 +486,7 @@ jupyter lab notebooks/interpret_outputs.ipynb
 Run the offline test suite, which uses mock services:
 
 ```bash
-python -m pytest
+python -m pytest -q -m 'not live'
 ```
 
 Run the optional two-spectrum live test against ESO and SIMBAD:
@@ -452,3 +498,4 @@ RUN_LIVE_TESTS=1 python -m pytest -m live -v
 The proposed production architecture, archive interface, operational plan,
 scientific validation, and open decisions have been moved to
 [docs/eso_archive_feature_plan.md](docs/eso_archive_feature_plan.md).
+For limitations of the current large trial, see [docs/scaling.md](docs/scaling.md).
